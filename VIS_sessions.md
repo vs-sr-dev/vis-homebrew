@@ -1065,4 +1065,21 @@ Single milestone, single sitting, two-iteration recovery (huge qualifier + door 
 
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Push to origin/main after commit per S9 user request.
 
+### S9 hot fix — held-key continuous movement (post-A.14)
+
+User surfaced after A.14 push: holding a d-pad key registered exactly one move and stopped. Bug present since A.6 (HC input) but invisible at the pre-A.13 framerate where one cursor pixel per tap blended into the message stream and the pause never showed. After A.14 each tap moves a full ~3/32 tile and the gap is obvious.
+
+**Fix v1 (TTL backstop):** held flags set by WM_KEYDOWN, decremented per WM_TIMER poll, cleared on WM_KEYUP if it ever arrives. SetTimer raised from 500 ms to 50 ms (debug bar throttled internally to 1 Hz). Tested → exactly 4 steps per tap (1 immediate + 3 from TTL=3 polls), then stuck. Diagnostic confirmed: VIS HC delivers neither WM_KEYDOWN auto-repeat nor WM_KEYUP. The TTL is the only thing terminating the held flag.
+
+**Fix v2 (GetAsyncKeyState polling):** dropped TTL entirely. WM_TIMER calls `GetAsyncKeyState(VK_HC1_*)` for each d-pad code and refreshes the held flags directly from the async keyboard buffer. WM_KEYDOWN kept as a tap-fast-path (one immediate step on the down edge so reactive without waiting up to one poll cycle). WM_KEYUP handler removed (never fires on VIS HC). Tested → continuous movement while held, stops cleanly on release. User: "Confermo funzionante perfetto ora!"
+
+**What this tells us about Modular Windows VIS HC input:**
+- WM_KEYDOWN delivers one event per physical press, no auto-repeat.
+- WM_KEYUP is never delivered for HC d-pad / button events.
+- GetAsyncKeyState DOES correctly track press/release on the HC keyboard buffer, even though the message-pump path doesn't surface WM_KEYUP. Async buffer is the canonical Win16 substitute for release detection on this hardware.
+
+This is the third known HC quirk after the A.8 "must call hcGetCursorPos to keep dispatcher routing keys" pattern and the A.14 "VIS native cursor must be triple-suppressed" pattern. New memory `reference_vis_hc_input_quirks.md` consolidates them so future input work doesn't re-discover.
+
+**Concrete delta:** modified `src/wolfvis_a14.c` (+57 lines: PollHeldKeysFromAsync helper, ApplyHeldMovement helper, WM_TIMER restructure, SetTimer 500→50 ms, debug bar throttle). EXE 231 KB unchanged size class. ISO rebuild + MAME test, single iteration.
+
 ---

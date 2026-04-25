@@ -1296,6 +1296,89 @@ static void TryMovePlayer(long dx_q88, long dy_q88)
     if (!IsBlockingForMove(tx_check, ty_check)) g_py = ny;
 }
 
+/* ---- Held-key state (S9 input fix v2) ----
+ *
+ * Win16 on Modular Windows VIS HC does not auto-repeat WM_KEYDOWN AND
+ * does not deliver WM_KEYUP at all. First fix attempt (TTL-based held
+ * flags refreshed by WM_KEYDOWN) capped at 4 steps per tap (1 immediate
+ * + 3 TTL polls), which is exactly what would happen if WM_KEYUP never
+ * fires: nothing refreshes the TTL, so it bottoms out and the flag
+ * auto-clears.
+ *
+ * Fix v2: poll GetAsyncKeyState directly each WM_TIMER. The async
+ * keyboard buffer is independent of message-processing state — if the
+ * HC driver maintains it correctly across the press/release transition,
+ * the polled value tells us "still down" vs "released" without any
+ * WM_KEYUP. WM_KEYDOWN is kept as a fast-path for the first step on
+ * tap (responsiveness) but no longer drives the held-state tracking. */
+#define MOVE_POLL_MS              50
+#define DEBUG_BAR_TICKS_INTERVAL  10  /* every 10 polls = 500 ms */
+static BYTE g_held_up      = 0;
+static BYTE g_held_down    = 0;
+static BYTE g_held_left    = 0;
+static BYTE g_held_right   = 0;
+static WORD g_poll_count   = 0;
+
+/* Apply one tick of held-key movement. Returns TRUE if anything moved
+ * or rotated. Forward/back are mutually exclusive (forward wins if
+ * both flags somehow set). Same for left/right rotation. Movement and
+ * rotation can stack in the same tick (e.g. circle-strafe-by-rotate). */
+static BOOL ApplyHeldMovement(void)
+{
+    long dx_q88, dy_q88;
+    BOOL changed = FALSE;
+
+    if (g_held_up) {
+        dx_q88 = ((long)COS_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15;
+        dy_q88 = ((long)SIN_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15;
+        TryMovePlayer(dx_q88, dy_q88);
+        changed = TRUE;
+    } else if (g_held_down) {
+        dx_q88 = -(((long)COS_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15);
+        dy_q88 = -(((long)SIN_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15);
+        TryMovePlayer(dx_q88, dy_q88);
+        changed = TRUE;
+    }
+    if (g_held_left) {
+        g_pa = (g_pa - ROT_STEP) & ANGLE_MASK;
+        changed = TRUE;
+    } else if (g_held_right) {
+        g_pa = (g_pa + ROT_STEP) & ANGLE_MASK;
+        changed = TRUE;
+    }
+    return changed;
+}
+
+/* Refresh held flags from the async keyboard buffer. Bit 0x8000 = key
+ * is currently down. If the HC driver keeps the buffer in sync with
+ * physical state, this is the canonical Win16 way to detect held keys
+ * without relying on WM_KEYUP. */
+static void PollHeldKeysFromAsync(void)
+{
+    g_held_up    = (GetAsyncKeyState(VK_HC1_UP)    & 0x8000) ? 1 : 0;
+    g_held_down  = (GetAsyncKeyState(VK_HC1_DOWN)  & 0x8000) ? 1 : 0;
+    g_held_left  = (GetAsyncKeyState(VK_HC1_LEFT)  & 0x8000) ? 1 : 0;
+    g_held_right = (GetAsyncKeyState(VK_HC1_RIGHT) & 0x8000) ? 1 : 0;
+}
+
+/* Centralized post-movement redraw — used by both WM_KEYDOWN (for the
+ * immediate tap response) and WM_TIMER (for the held-key polling). */
+static void InvalidatePlayerView(HWND hWnd)
+{
+    RECT dirty;
+    DrawViewport();
+    DrawCrosshair();
+    DrawMinimapWithPlayer();
+    dirty.left   = VIEW_X0;
+    dirty.top    = VIEW_Y0;
+    dirty.right  = MINIMAP_X0 + MAP_W;
+    dirty.bottom = VIEW_Y0 + VIEW_H;
+    InvalidateRect(hWnd, &dirty, FALSE);
+    g_px_prev = g_px;
+    g_py_prev = g_py;
+    g_pa_prev = g_pa;
+}
+
 long FAR PASCAL _export WolfVisWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp)
 {
     PAINTSTRUCT ps;
@@ -1323,7 +1406,6 @@ long FAR PASCAL _export WolfVisWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN: {
         long dx_q88, dy_q88;
-        RECT dirty;
         BOOL moved = FALSE, rotated = FALSE;
 
         last_key_wparam = (WORD)wp;
@@ -1332,7 +1414,10 @@ long FAR PASCAL _export WolfVisWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp
         msg_count++;
         switch (wp) {
         case VK_HC1_UP:
-            /* Forward along heading. dx = cos(g_pa) * MOVE_STEP, dy = sin. */
+            /* Forward along heading. dx = cos(g_pa) * MOVE_STEP, dy = sin.
+             * Tap-fast-path: apply one immediate step on the WM_KEYDOWN
+             * edge so first tap is reactive without waiting up to one
+             * poll cycle. Subsequent steps come from the async poll. */
             dx_q88 = ((long)COS_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15;
             dy_q88 = ((long)SIN_Q15(g_pa) * (long)MOVE_STEP_Q88) >> 15;
             TryMovePlayer(dx_q88, dy_q88);
@@ -1371,37 +1456,41 @@ long FAR PASCAL _export WolfVisWndProc(HWND hWnd, UINT msg, WPARAM wp, LPARAM lp
         default: break;
         }
 
-        if (moved || rotated) {
-            DrawViewport();
-            DrawCrosshair();
-            DrawMinimapWithPlayer();
-            dirty.left   = VIEW_X0;
-            dirty.top    = VIEW_Y0;
-            dirty.right  = MINIMAP_X0 + MAP_W;
-            dirty.bottom = VIEW_Y0 + VIEW_H;
-            InvalidateRect(hWnd, &dirty, FALSE);
-            g_px_prev = g_px;
-            g_py_prev = g_py;
-            g_pa_prev = g_pa;
-        }
+        if (moved || rotated) InvalidatePlayerView(hWnd);
         return 0;
     }
 
     case WM_TIMER: {
         RECT  dirty;
         POINT pt;
-        tick_count++;
-        has_focus = (GetFocus() == hWnd);
-        /* Pump HC cursor pos to keep MW HC dispatcher routing keys. The
-         * returned coords are unused — we just need the side effect. */
+        BOOL  moved;
+
+        g_poll_count++;
+        /* Pump HC cursor pos every poll — keeps MW HC dispatcher
+         * routing keys (A.8 gotcha pattern). */
         pt.x = 0; pt.y = 0;
         hcGetCursorPos((LPPOINT)&pt);
-        DrawDebugBar();
-        dirty.left   = 0;
-        dirty.top    = 0;
-        dirty.right  = SCR_W;
-        dirty.bottom = DEBUG_BAR_H;
-        InvalidateRect(hWnd, &dirty, FALSE);
+
+        /* Async-poll the keyboard for held d-pad state, then apply
+         * one tick of movement per held key. Async poll is the canonical
+         * Win16 substitute for WM_KEYUP-driven release tracking. */
+        PollHeldKeysFromAsync();
+        moved = ApplyHeldMovement();
+        if (moved) InvalidatePlayerView(hWnd);
+
+        /* Debug bar update at lower cadence to avoid eating CPU on a
+         * 50 ms timer (the bar barely needs to refresh — just heartbeat
+         * + status indicators). Ticks every 500 ms as in A.13. */
+        if ((g_poll_count % DEBUG_BAR_TICKS_INTERVAL) == 0) {
+            tick_count++;
+            has_focus = (GetFocus() == hWnd);
+            DrawDebugBar();
+            dirty.left   = 0;
+            dirty.top    = 0;
+            dirty.right  = SCR_W;
+            dirty.bottom = DEBUG_BAR_H;
+            InvalidateRect(hWnd, &dirty, FALSE);
+        }
         return 0;
     }
 
@@ -1496,7 +1585,9 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
     UpdateWindow(hWnd);
     SetFocus(hWnd);
     SetActiveWindow(hWnd);
-    SetTimer(hWnd, 1, 500, NULL);
+    /* 50 ms = 20 Hz — fast enough for held-key movement to feel
+     * continuous. Debug bar throttles itself to 1 Hz inside WM_TIMER. */
+    SetTimer(hWnd, 1, MOVE_POLL_MS, NULL);
 
     for (;;) {
         if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
