@@ -27,6 +27,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.14 — Sprites in world | Static-decoration billboards over the cast scene + 1D z-buffer + painter's sort | ✅ |
 | A.14.1 — Doors | DOORWALL texture + per-tile state machine + sliding slab + PRIMARY toggle | ✅ |
 | A.15 — HUD | Wolf3D-style status bar with 7 panels + 4×6 digit font + face placeholder | ✅ |
+| A.16a — Static enemies | Guard billboards (108..115 + 144..151 + 180..187) + 8-direction CalcRotate via atan2 LUT | ✅ |
 
 ## Repository layout
 
@@ -61,14 +62,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a15.bat"    # produces build/WOLFA15.EXE
-python mkiso_a15.py                 # produces build/wolfvis_a15.iso
+cmd /c ".\build_wolfvis_a16a.bat"   # produces build/WOLFA16A.EXE
+python mkiso_a16a.py                # produces build/wolfvis_a16a.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a15.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a16a.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

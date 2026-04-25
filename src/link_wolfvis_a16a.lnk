@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA16A.EXE
+FILE          ..\build\wolfvis_a16a.obj
+OPTION        MAP=..\build\WOLFA16A.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.16a static enemies (guard billboards, no AI)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

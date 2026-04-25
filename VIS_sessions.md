@@ -1289,3 +1289,177 @@ Two new traps documented for future use: (1) BJ face is in VGAGRAPH not VSWAP �
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Two commits in one session this time (A.14.1 + A.15) to keep the history bisectable.
 
 ---
+
+## Session 11 — 2026-04-25 — Milestone A.16a (static enemies, 8-direction)
+
+**Scope:** the world contains its first living-target-shaped objects. Wolf3D guards rendered as static billboards at their `map_plane1` tile positions in E1L1, picking the right 8-direction sprite frame each draw based on the player's view angle relative to the enemy's facing. Validates the full asset/scan/render/rotation pipeline for enemies — the structural prerequisites for A.16b (AI ticker) and A.18 (firing/hitscan/damage). No AI, no HP, no movement, no walking animation, no death frames yet.
+
+User selected scope at S11 open: A.16a as the next milestone per S10 wrap. Pre-coding recon-first per the A.14.1 zero-iteration playbook (read vanilla Wolf3D source for sprite indices, tile decoder, rotation formula, direction encoding). Two commits in one session: iter 1 dry-run (front-view-only, validates load+scan+render) then iter 2 (8-direction rotation via CalcRotate-style atan2). Wall-texture variety regression surfaced by the user mid-S11 deferred to A.13.1 polish per the bundling memo.
+
+### Pre-coding recon (~10 min)
+
+Read four files in `wolf3d/WOLFSRC/` before touching `wolfvis_a16a.c`:
+
+- **`WL_DEF.H` lines 159-208** — sprite enum order in VSWAP. Confirmed: `SPR_DEMO=0`, `SPR_DEATHCAM=1`, `SPR_STAT_0..47 = 2..49` (48 statics in non-SPEAR shareware, not 16 as I'd assumed from A.14's load size), `SPR_GRD_S_1..S_8 = 50..57`. Walking and death frames extend through chunk 98. The chunk indices are absolute relative to `sprite_start_idx`, so loading `SPR_GRD_S_n` means reading VSWAP page `sprite_start_idx + 50 + (n-1)`.
+- **`WL_DEF.H` line 562** — `dirtype` enum: `{east=0, northeast=1, north=2, northwest=3, west=4, southwest=5, south=6, southeast=7, nodir=8}`. CCW, 8 sectors of 45°. Critically: this is **not** N/E/S/W in 0..3 order, it's E/N/W/S interleaved with diagonals.
+- **`WL_GAME.C` lines 315-477** — tile-to-spawn decoder. The S11 todo memo had the wrong tile range cached ("108..115 standing + 116..127 patrol"). Correct decoder for guards across all three difficulty tiers:
+
+| enemy | behavior | easy tiles | medium tiles | hard tiles |
+|-------|----------|-----------|--------------|-----------|
+| guard | stand | 108..111 | 144..147 | 180..183 |
+| guard | patrol | 112..115 | 148..151 | 184..187 |
+| officer | stand | 116..119 | 152..155 | 188..191 |
+| officer | patrol | 120..123 | 156..159 | 192..195 |
+| ss | stand | 126..129 | 162..165 | 198..201 |
+| ss | patrol | 130..133 | 166..169 | 202..205 |
+| dog | stand | 134..137 | 170..173 | 206..209 |
+| dog | patrol | 138..141 | 174..177 | 210..213 |
+
+  Vanilla skips the medium/hard sets when `gamestate.difficulty < gd_medium` (or `gd_hard`); for PoC we ignore the gate and spawn every tier so all guard tiles a level designer placed are visible regardless of difficulty intent. Tile **124** is `SpawnDeadGuard` (corpse, deferred).
+
+- **`WL_ACT2.C` line 854 + line 905** — `SpawnStand(en_guard, ...)` calls `SpawnNewObj(... &s_grdstand)` then sets `new->dir = dir*2`. So the tile-base offset 0..3 (E/N/W/S) becomes dirtype 0/2/4/6 — the four cardinal directions of the 8-element dirtype enum, with diagonals reserved for AI-rotated enemies.
+- **`WL_DRAW.C` lines 1024-1048 (`CalcRotate`)** — the rotation formula in vanilla:
+
+  ```
+  viewangle = player->angle + (centerx - ob->viewx)/8;
+  angle = (viewangle - 180) - dirangle[ob->dir];
+  angle += ANGLES/16;          // 22.5° half-sector centering
+  angle = angle mod ANGLES;
+  sector = angle / (ANGLES/8); // 0..7
+  shapenum = SPR_GRD_S_1 + sector;
+  ```
+
+  The `(centerx - viewx)/8` per-column tweak is for sub-pixel rotation accuracy; we drop it for PoC (negligible visual difference).
+
+### Iter 1 — dry-run (front-view-only, ~30 min)
+
+**Goal:** validate the load/scan/render pipeline without rotation in the loop, so any issue is isolated to a single subsystem.
+
+Cloned `wolfvis_a15.c` → `wolfvis_a16a.c` plus the `_sintab.h`, `link_*.lnk`, `build_*.bat`, `mkiso_*.py` chain. Cloned `cd_root_a15/` → `cd_root_a16a/` and updated `SYSTEM.INI`'s `shell=` line. Build infrastructure mirrors A.15 conventions exactly so a future A.16a viewer can diff against any prior milestone clean.
+
+Source-side changes vs A.15:
+
+- **`NUM_SPRITES`** bumped 18 → 26. Slots 0..17 keep the legacy A.14 layout (SPR_DEMO, SPR_DEATHCAM, SPR_STAT_0..15); slots 18..25 carry the 8 SPR_GRD_S_1..S_8 frames. Memory: 26 × 4096 = 104 KB total in the `__huge sprites[]` BSS array.
+- **`sprite_chunk_offs[NUM_SPRITES]`** new sparse-load lookup table: `{0..17, 50..57}`. The VSWAP loader reads `pageoffs[sprite_start_idx + sprite_chunk_offs[i]]` per slot, so the 32 unused chunks 18..49 (SPR_STAT_16..47, none referenced on E1L1) are skipped without leaving holes in `sprites[]`.
+- **`MAX_OBJECTS`** bumped 64 → 128. E1L1 carries enough enemy + decoration tiles to plausibly exceed 64; insertion sort over a side array of 128 entries is 16K compares worst case, trivial vs the cast workload.
+- **`Object` struct** extended with `BYTE enemy_dir` (`OBJ_DIR_NONE=0xFF` for static decoration, dirtype 0..7 for enemies). Decoration entries set this to NONE so the rotation branch in `DrawAllSprites` skips them and the legacy `sprite_idx` path runs unchanged.
+- **`GuardTileToDir(tile)`** helper returns 0..3 for any of the 24 guard tile values (across all 3 difficulty tiers, both stand and patrol), -1 otherwise. Decoupled from the spawn classification for clarity.
+- **`ScanObjects`** rewritten to two branches per cell: branch 1 = legacy decoration scan (obj_id 23..38 → sprite_idx = obj_id - 23 + 2), branch 2 = `GuardTileToDir(obj)` ≥ 0 → emit Object with `sprite_idx = GUARD_S_FIRST_SLOT (=18)` (front-view stub for dry-run) and `enemy_dir = dir4 * 2` (E/N/W/S → dirtype 0/2/4/6). Per-frame counters `g_num_static` + `g_num_enemies` exposed for future debug.
+- **`ObjectToColor`** extended: all 24 guard tiles map to color **40 (bright red)** on the minimap, so the user can navigate "by treasure-hunt" toward enemy positions even before rendering them at depth. (User confirmed at iter-1 review: "puntini rossi sono proprio stati loro il metodo con cui sono andato alla ricerca" — the minimap markers were the actual gameplay-discovery aid.)
+
+Build: clean compile + link first try. EXE 280 KB (+34 KB vs A.15, mostly the 8 new sprite slots in BSS). ISO 1.19 MB.
+
+Test: MAME 0.287 vis launch, 131 s wall-clock at 99.47% emulation speed, normal exit. Snapshot `snap/vis/0016.png` confirms:
+- Brown-uniformed guard sprite (SPR_GRD_S_1, front view) clearly visible in the viewport between Hitler-poster wall textures.
+- Multiple bright-red dots scattered across the minimap = guard spawn tiles in plane1 — the user used these as a navigation aid to seek out enemies in subsequent traversals.
+- Decoration sprites (chandelier visible) intact, painter's sort handles enemy + decoration without z-glitch.
+- HUD intact (zero per-frame cost preserved; A.15 static-bg bake undisturbed).
+
+User v1: "Guardia vista (si nota poco, è nello snap ma è vicina a texture con dipinti quindi si confonde), tutto OK!"
+
+### Iter 2 — 8-direction rotation (~30 min)
+
+**Goal:** complete A.16a properly — every enemy presents the right SPR_GRD_S_n frame for the player's current viewing angle, so walking around a guard reveals front/profile/back as it should.
+
+New artifacts:
+
+- **`gen_atan_lut.py`** — 30-line build helper that generates `wolfvis_a16a_atantab.h` with `atan_q10_lut[257]`. Input domain t = i/256 for i in 0..256 (so [0, 1] covered with 257 entries). Output: `round(atan(t) * 1024 / (2*pi))`, range [0, 128] (= [0, 45°] in our Q10 angle space). Mirrors the `wolfvis_a13_sintab.h` Python-generated LUT pattern that started life as the `<math.h>` workaround for the WIN87EM trap.
+- **`dirangle_q10[8]`** const table mapping WL_DEF.H dirtype 0..7 to our Q10 angle space, accounting for the CW orientation forced by Y+ = south:
+
+  ```
+  E=0, NE=896, N=768, NW=640, W=512, SW=384, S=256, SE=128
+  ```
+- **`atan2_q10(dy, dx)`** — full atan2 reconstruction without `<math.h>`:
+  - Magnitude-swap so `|slope| <= 1`, look up `atan_q10_lut[abs_min * N / abs_max]`, returns `[0, 128]` in Q10.
+  - If `|dy| > |dx|`, return `256 - lookup` (so result is in `[128, 256]`).
+  - Quadrant fixup via signs of dx, dy: Q1 → as-is, Q2 → `512 - base`, Q3 → `512 + base`, Q4 → `1024 - base`.
+
+  Cost: ~10 cycles per call (one divide for the ratio + one LUT load + branch). Called once per visible enemy per frame in `DrawAllSprites`, negligible vs cast.
+
+- **`DrawAllSprites` rotation branch** — per-object pre-call computation:
+  ```c
+  long e2p_dx = g_px - obj_x_q88;
+  long e2p_dy = g_py - obj_y_q88;
+  int  e2p_angle = atan2_q10(e2p_dy, e2p_dx);     // direction enemy -> player
+  int  facing = dirangle_q10[obj.enemy_dir & 7];  // direction enemy faces
+  int  rel = (facing - e2p_angle + 1024 + 64) & ANGLE_MASK;  // half-sector centered
+  int  sector = (rel >> 7) & 7;
+  sprite_idx = GUARD_S_FIRST_SLOT + sector;       // 18..25
+  ```
+  Static decorations (`enemy_dir == OBJ_DIR_NONE`) skip this branch and use their stored `sprite_idx` as before.
+
+Build clean +1 KB (atan LUT 514 B + dirangle 16 B + atan2 fn ~250 B code). Test launch.
+
+**One iteration on rotation sign.** First version had `rel = e2p_angle - facing + ...`; user verdict: "credo sia da invertire, per il resto tutto OK". The sign of the rotation differed by reflection (S_2/S_8 swap, S_3/S_7 swap) because Wolf3D's `SPR_GRD_S_n` art layout is CCW around the enemy in standard math convention while our Q10 angle space goes CW from east. Fix: swap the operand order to `rel = facing - e2p_angle + ...`. Single character delta.
+
+Final test: snapshots `snap/vis/0019.png` (right-profile guard with rifle clearly visible) + `0020.png` (back-view guard, helmet from behind, dark uniform); both look like authentic Wolfenstein 3D frames. User v2: "Perfetto ora".
+
+### Side discovery — wall texture variety regression (deferred to A.13.1)
+
+User flagged mid-S11: "altro side da investigare: problema di seek delle texture dei muri, mi sembra ci siano davvero TROPPI muri con dipinti nazi". Confirmed legitimate bug in `TileToWallTex(tile)`:
+
+```c
+return (int)(((tile - 1) * 2) % WALL_COUNT);  // WALL_COUNT = 8
+```
+
+The `*2` here echoes Wolf3D's `wall_page = (tile-1)*2` for the light face (with `+1` for dark face). With WALL_COUNT=8 the modulo collapses tile 1..63 onto wall pages {0, 2, 4, 6} only — pages {1, 3, 5, 7} (the dark faces of walls 1..4) are loaded but never sampled. Worse, tiles {2, 6, 10, 14, ..., 62} (16 distinct plane0 tile values) all map to page 2 = the Hitler-poster wall texture, so any wall whose tile id is `≡ 2 (mod 4)` shows up as Hitler regardless of the level designer's intent. That's the "TROPPI muri con dipinti nazi" the user noticed.
+
+Three fix tiers proposed (quick / better / best):
+- Quick (~5 min, zero memory): drop the `*2`, use `(tile - 1) % WALL_COUNT`. Loads light faces of 8 distinct walls, but ditches the light/dark distinction entirely.
+- Better (~15 min, +32 KB): bump WALL_COUNT to 16, load chunks {0, 2, 4, ..., 30} (16 light faces). Right at the 64 KB segment cap so likely needs `__huge` migration mirroring sprites.
+- Best (~30 min): WALL_COUNT 32 (16 light + 16 dark), pick light vs dark in CastRay based on side-X vs side-Y face hit (canonical Wolf3D fake-lighting pattern).
+
+User chose to defer per the existing bundling plan: "lasciamo defer, lo teniamo insieme al resto di A.13.1". A.13.1 was already on the books as raycaster polish (grid-line DDA + light-by-distance) and the wall-variety fix is the natural third deliverable for that milestone. Captured in `reference_walltex_modulo_bug.md` so the recon work isn't lost.
+
+### Build
+
+- Compile (both iters): `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a16a.obj wolfvis_a16a.c` — clean, no warnings.
+- Link (both iters): `wlink @link_wolfvis_a16a.lnk` — same `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` chain.
+- Output: `build/WOLFA16A.EXE` 281 KB, `build/wolfvis_a16a.iso` 1.19 MB.
+
+### Result
+
+Snapshots `snap/vis/0016.png 0017.png 0018.png 0019.png 0020.png` walk through:
+- 0016: iter-1 dry-run, single guard front-view + minimap red dots scattered across plane1.
+- 0017: iter-2 first try — guard in left-profile (rotation working but sign-flipped per art layout).
+- 0018: iter-2 first try, multiple guards visible at varied scales — confirmed rotation responding to angle but in mirrored direction.
+- 0019: iter-2 final — right-profile guard, rifle on visible shoulder, classic Wolf3D side art.
+- 0020: iter-2 final — back-view guard, helmet from behind, full uniform — exactly the SPR_GRD_S_5 frame the math predicted.
+
+Perf: ~2-3 FPS, unchanged from A.14.1 / A.15 (cast cost dominates; rotation branch adds one atan2 + one divide per visible enemy, negligible). User noted explicitly during iter-1: "altre non raggiunte perché oggettivamente con FPS così basso ci si mette troppo tempo" — the perf-as-interaction-blocker trigger from the S11 todo memo just fired, queueing A.13.1 for S12 with concrete urgency.
+
+### Trap / Gotcha / Eureka (S11)
+
+- **Trap S11.1 — S11 todo memo had stale tile ranges.** The memo cached "guards = 108..115 stand + 116..127 patrol", which is wrong on two counts: (1) patrol is 112..115 not 116..127, and (2) it omitted the medium (144..151) and hard (180..187) tier tiles entirely. The error was a verbatim copy from an earlier mental model that hadn't been verified against `WL_GAME.C`. Recon caught it before any code was written, so cost was zero — but the S11 todo memo file should be updated (or replaced by a pointer to this VIS_sessions entry) so future-me doesn't trust the cached ranges. Lesson: tile-range constants in roadmap memos decay; verify against vanilla source any time the source is referenced concretely.
+- **Trap S11.2 — Wall-texture modulo collapses 16 tiles onto Hitler poster.** See "Side discovery" above. Root cause: `(tile-1)*2 % 8` cycles through {0, 2, 4, 6} only, mapping every fourth tile (≡ 2 mod 4) onto wall page 2. Pre-existing bug since A.4 (when WALL_COUNT was first set to 4 and then bumped to 8 in A.13). User-visible symptom only became prominent once we had enough wall variety in E1L1 viewport to notice the repetition pattern.
+- **Trap S11.3 — Rotation sign disagreement between vanilla art layout and our angle convention.** First iter-2 build had rotation responding to view angle correctly but with the chirality flipped (S_2/S_8 swap, etc.). Wolf3D's SPR_GRD_S_n frames are arranged CCW around the enemy in vanilla math convention; our Q10 angle space goes CW from east because Y+ = south. The two chirality conventions cancel in some terms and compound in others, so the right answer for our combination ended up being `rel = facing - e2p_angle + 1024 + 64`. Single-character fix in iter-2; for any future Wolf3D rotation port this is the asymmetry to watch.
+- **Eureka S11.E1 — Recon-first → zero-iteration on the load/scan/render path.** A.16a iter 1 changed the VSWAP loader (sparse offset table), the BSS layout (sprites bumped 18→26), the Object struct (added enemy_dir), the ScanObjects pass (new branch), and the minimap helper (new color range), and built clean + ran correctly on the very first MAME launch. Zero fix iterations. The pattern matches A.14.1 exactly: read vanilla source for indices and conventions before writing C, keep the new pieces structurally similar to existing pieces (sparse `sprite_chunk_offs[]` is the obvious extension of "load 18 contiguous chunks"), and the build is forced to be additive rather than transformative.
+- **Eureka S11.E2 — Minimap markers earn double duty as gameplay nav aid.** ObjectToColor extension to color guards bright red was originally for "see at a glance the level has guards"; user immediately repurposed it as a gameplay aid for finding distant enemies under the 2-3 FPS perf budget. The pattern generalizes: any debug-visualization feature that surfaces non-trivial world state (enemy positions, item locations, switch states) is a candidate gameplay aid worth keeping in the final game, not just a stripped-after-debugging temporary.
+- **Eureka S11.E3 — atan2 LUT is the right amortized cost vs alternatives.** Considered three alternatives for the atan2-without-`<math.h>` problem: (a) full 2D LUT indexed by (dy, dx) clamped to small range — too memory-heavy for the precision needed; (b) inverse-search via existing sin LUT — slow and irregular; (c) octant test + comparison without LUT — only 8-resolution, exactly the thing we *don't* want for sub-frame transitions. The 1D atan LUT with quadrant fixup is 514 bytes for full-precision, a ~10-cycle hot path, and the same shape as `sin_q15_lut`. Building a small Python helper to generate it as a header keeps the discipline of "no `<math.h>` in source" intact.
+
+### Concrete results
+
+- New: `src/wolfvis_a16a.c` (~1500 LOC, +70 vs A.15), `src/wolfvis_a16a_sintab.h` (copy of A.15 sintab), `src/wolfvis_a16a_atantab.h` (Python-generated Q10 atan LUT, 257 entries), `src/gen_atan_lut.py`, `src/link_wolfvis_a16a.lnk`, `src/build_wolfvis_a16a.bat`, `src/mkiso_a16a.py`.
+- New: `cd_root_a16a/` (9 files: A.15 set with `WOLFA16A.EXE` + `SYSTEM.INI` updated to `shell=a:\WOLFA16A.EXE`).
+- New: `build/WOLFA16A.EXE` (281 KB), `build/wolfvis_a16a.iso` (1.19 MB).
+- New: `snap/vis/0016.png` (iter-1 dry-run), `0017.png`, `0018.png` (iter-2 first try, mirrored rotation), `0019.png` (right-profile final), `0020.png` (back-view final).
+- README: A.16a row added to status table (✅). Quick-start build/launch commands updated to A.16a binaries.
+- Deferred: wall-texture modulo fix → A.13.1 (with grid-line DDA + light-by-distance).
+
+### Next-step candidates for Session 12
+
+1. **A.13.1 — Raycaster polish + wall variety** (~1-1.5 h). Bundles three deliverables: (a) grid-line DDA replacing step-by-fraction (sub-pixel-exact tex coords, cheaper), (b) light-by-distance Wolf3D palette ramp, (c) wall-variety bug fix (drop the `*2` modulo, possibly bump WALL_COUNT to 16 with `__huge` migration). Resolves the perf-as-interaction-blocker that fired in S11 + closes the wall regression. **Strong default for S12.**
+2. **A.16b — Enemy AI ticker** (~1.5-2 h). State machine per enemy (idle/walk/attack/hit/die) + LOS check vs player + movement integration. Reuses A.16a Object[] + DrawAllSprites with rotation; only new code is the AI ticker + walk-frame animation cycle.
+3. **A.15.1 — Real BJ face from VGAGRAPH** (~1-1.5 h). Chunked Huffman loader + picture table for VGAGRAPH.WL1. Lower priority (placeholder works), unlocks title screen + menu graphics.
+
+S11 wrap recommendation: **A.13.1 first** — perf is now blocking the user from validating any future enemy or weapon work, so unlock it before A.16b. With ~10-15 FPS target after A.13.1, A.16b's AI work becomes verifiable in normal gameplay (you can actually walk around a moving guard) instead of via static snapshots. A.13.1 is also the natural wall-variety landing site per S11.
+
+### S11 wrap-up
+
+Single milestone, single sitting, two iterations (load+scan+render dry-run, then 8-direction rotation). One-character fix on the rotation chirality. Foundation chain A.1..A.15 paid off again — A.16a is +70 LOC of additive code (sparse VSWAP table, dirangle, atan2_q10, rotation branch in DrawAllSprites) plus a 514 B Python-generated LUT. No structural change to ScanObjects' shape, DrawSpriteWorld's signature, or any pre-existing subsystem.
+
+Bonus discoveries: (1) the wall-texture modulo regression — pre-existing, surfaced by the user mid-S11, captured + deferred to A.13.1; (2) the minimap-markers-as-nav-aid pattern that promotes a debug feature into a gameplay one.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Two commits in S11 (iter-1 dry-run could have been a separate commit but was rolled into the S11 close commit since iter-2 was minor and the milestone reads as one atomic deliverable in retrospect).
+
+---
