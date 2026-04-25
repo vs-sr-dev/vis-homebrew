@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA9.EXE
+FILE          ..\build\wolfvis_a9.obj
+OPTION        MAP=..\build\WOLFA9.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.9 perf refactor (static bg + dirty rect)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
