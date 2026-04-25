@@ -227,6 +227,13 @@ static WORD  msg_count       = 0;
 static WORD  tick_count      = 0;
 static BOOL  has_focus       = FALSE;
 
+/* Perf telemetry: ms spent in the most recent DrawViewport+sprites
+ * pass, measured via PIT counter (596.4 cycles/ms — same divisor as
+ * IMF clock, see reference_pit_596khz_vis). Displayed as a bit grid
+ * in the debug bar so future perf-sweep work has a baseline to
+ * regress against. */
+static WORD  g_last_render_ms = 0;
+
 /* ---- OPL3 routines ---- */
 
 static void OplDelay(int cycles)
@@ -1266,6 +1273,36 @@ static void DrawDebugBar(void)
     FB_FillRect(266, 1, 40, 6, (BYTE)((key_count & 0x07) ? 105 : 15));
     DrawBitGrid(16, 10, 7, last_msg_type, 42, 15);
     DrawBitGrid(16, 19, 7, last_key_wparam, 143, 15);
+
+    /* Perf telemetry: 14×6 swatch + 100px horizontal bar. Color
+     * encodes ms/frame tier for at-a-glance perf health.
+     *   green  (105) : <  33 ms (≥30 FPS effective)
+     *   yellow (14)  : 33-66 ms (15-30 FPS)
+     *   orange (42)  : 66-200 ms (5-15 FPS)
+     *   red    (40)  : > 200 ms (< 5 FPS)
+     * Bar: 1 px per 2 ms, capped at 100 px (200 ms = full bar).
+     *   - Empty portion: bright white track (color 15) so the boundary
+     *     between filled / empty is unambiguous.
+     *   - Tick: single-px black mark at x=120+16 (=33 ms / 30 FPS line)
+     *     so the eye finds the "good enough" threshold without counting
+     *     pixels.
+     * Combined with the swatch, the eye reads "color = tier, length =
+     * precise value, tick = reference threshold" without a font. */
+    {
+        BYTE tier_col;
+        int  bar_w;
+        if      (g_last_render_ms <  33)  tier_col = 105;
+        else if (g_last_render_ms <  66)  tier_col =  14;
+        else if (g_last_render_ms < 200)  tier_col =  42;
+        else                              tier_col =  40;
+        bar_w = (int)g_last_render_ms / 2;
+        if (bar_w > 100) bar_w = 100;
+        FB_FillRect(104, 1, 14, 6, tier_col);
+        FB_FillRect(120, 1, 100, 6, 15);              /* white track */
+        if (bar_w > 0) FB_FillRect(120, 1, bar_w, 6, tier_col);
+        /* Reference tick at 33 ms (16 px from bar start). */
+        FB_FillRect(136, 0, 1, 8, 0);
+    }
 }
 
 static void SetupStaticBg(void)
@@ -1362,13 +1399,34 @@ static void PollHeldKeysFromAsync(void)
 }
 
 /* Centralized post-movement redraw — used by both WM_KEYDOWN (for the
- * immediate tap response) and WM_TIMER (for the held-key polling). */
+ * immediate tap response) and WM_TIMER (for the held-key polling).
+ * Sandwiches the actual render with PIT reads so we can display
+ * ms/frame in the debug bar (telemetry for the future perf sweep). */
 static void InvalidatePlayerView(HWND hWnd)
 {
-    RECT dirty;
+    RECT  dirty;
+    WORD  pit_before, pit_after;
+    DWORD pit_diff;
+
+    pit_before = ReadPitCounter();
     DrawViewport();
     DrawCrosshair();
     DrawMinimapWithPlayer();
+    pit_after = ReadPitCounter();
+    /* PIT counter 0 decrements; wraps 0 -> 65535. */
+    if (pit_after > pit_before) {
+        pit_diff = (DWORD)pit_before + (65536UL - (DWORD)pit_after);
+    } else {
+        pit_diff = (DWORD)pit_before - (DWORD)pit_after;
+    }
+    /* 596 PIT cycles per ms (PIT @ 596.4 kHz on MAME-VIS). Cap at
+     * 0xFFFF so a runaway diff doesn't garble the bit grid. */
+    {
+        DWORD ms = pit_diff / 596UL;
+        if (ms > 0xFFFFUL) ms = 0xFFFFUL;
+        g_last_render_ms = (WORD)ms;
+    }
+
     dirty.left   = VIEW_X0;
     dirty.top    = VIEW_Y0;
     dirty.right  = MINIMAP_X0 + MAP_W;
