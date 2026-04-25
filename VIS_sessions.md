@@ -997,3 +997,72 @@ Bonus deliverable: native cursor suppression that has been a visible-but-deferre
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit.
 
 ---
+
+## Session 9 — 2026-04-25 — Milestone A.14 (sprites in world)
+
+**Scope:** the first milestone where the viewport is recognizably Wolfenstein 3D, not just a tech demo of textured walls. Static decoration sprites placed at their plane1 tile positions in E1L1, transformed world→camera each frame, projected to viewport columns with focal=96 px, scaled by inverse depth, rendered after walls with a 1D per-column z-buffer so walls correctly occlude near-side sprites. User confirmed scope at session open: "Procedi" — straight from the S8 wrap recommendation of A.14 first, A.13.1 polish later.
+
+### Subsystems added
+
+- **`sprites[18][4096] __huge`** — Demo + DeathCam + 16 SPR_STAT_*, re-loaded from VSWAP via the A.5 chunk-by-chunk path. The 18×4096 = 72 KB array exceeds Watcom's 64 KB segment cap, so we bumped the qualifier from `__far` (which Watcom rejects with `E1157: Variable must be 'huge'`) to `__huge`. Per-row 4 KB chunks still fit one segment each, so DrawSprite/DrawSpriteWorld dereference into a single sprite row without huge-pointer arithmetic per pixel — only the row index selects which segment.
+- **`Object[] g_objects`, `ScanObjects()`** — at boot, walk plane1 and emit one Object per tile whose obj_id lies in 23..38 (Wolf3D static decoration range, mapping to SPR_STAT_0..SPR_STAT_15). Tile center is the world position; sprite_idx = (obj_id - 23) + 2 (the +2 skips Demo/DeathCam slots in our sprite array). Capped at MAX_OBJECTS=64.
+- **`g_zbuffer[VIEW_W]`** — long Q8.8 array, written by `DrawWallStripCol` per column with the per-column perp distance, read by sprites for occlusion test.
+- **`DrawSpriteWorld(tile_x, tile_y, sprite_idx)`** — world→camera rotation by `-g_pa`, depth/right axes via dot products with cos/sin Q15. Cull if cam_y < 32 (1/8 tile, behind or too close). Screen X = `VIEW_W/2 + cam_x * focal / cam_y` with constant `FOCAL_PIXELS=96` (matches `(VIEW_W/2)/tan(FOV_ANGLES/2 in rad)` for FOV_ANGLES=192). Sprite height in pixels = `(VIEW_H * 256) / cam_y` — same inverse-depth formula as walls so a 64-tile-tall sprite covers the same vertical range as a wall at the same depth. Per-column z-test against `g_zbuffer[col]` skips columns where a wall is in front. Inner sample loop is the A.13 wall-strip / A.12 scaler column-walk pattern unchanged.
+- **`DrawAllSprites()`** — painter's-order render: insertion-sort visible objects by descending cam_y, draw back-to-front so closer sprites paint over farther ones in their overlap region. Side-arrays of (depth, obj_idx) pairs avoid reordering `g_objects[]` itself (scan order stable across frames).
+
+### Movement vs render split (door workaround)
+
+User reported first launch trapped in the spawn cell with "stessa stanza chiusa con quadri nazi": E1L1's BJ spawn is a 2-tile cell with one closed door, and our `IsWall` treats door tiles 90..101 as blocking, so the player could not exit. Door-open / door-swing logic is non-trivial (Wolf3D has an AI-driven open/close state machine over WL_INTER) and is correctly A.14.1 polish, not A.14 PoC content. Quick split:
+
+- `IsWall(tx, ty)`: walls + doors (kept). Used by `CastRay` so doors render as wall slabs on screen, preserving the visual integrity of the cast.
+- `IsBlockingForMove(tx, ty)`: walls only (new). Used by `TryMovePlayer` so the player walks through closed-door tiles.
+
+Cosmetic glitch: the player visibly "phases through" a wall slab where a door is. Consciously accepted PoC trade-off — being stuck in spawn forever is a strictly worse user experience than walking through a wall. Real door rendering goes into A.14.1 polish.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a14.obj wolfvis_a14.c`. First attempt failed with `E1157: Variable must be 'huge'` on the new `sprites[18][4096]` array — added `__huge` qualifier, recompiled clean.
+- Link: `wlink @link_wolfvis_a14.lnk` — same `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` pattern as A.8+.
+- Output: `build/WOLFA14.EXE` (231 KB; +11 KB vs A.13 for sprite re-load + ScanObjects + DrawSpriteWorld + insertion sort + z-buffer), `build/wolfvis_a14.iso` (1.16 MB).
+
+### Result
+
+Confirmed working on MAME 0.287 vis after one fix iteration (door-passable movement). Snapshots `snap/vis/0006.png`, `0007.png`:
+
+- 0006: green chandelier sprite (SPR_STAT_2) hanging from ceiling at mid-corridor distance, correctly scaled, opaque pixels in upper half of bbox (matching Wolf3D's ceiling-anchored decoration convention) so it visually appears above horizon. Walls Hitler-poster intact. Z-buffer occludes the sprite cleanly at viewport edges.
+- 0007: two sprites visible at different depths down a corridor, scaling proportional to inverse distance, painter's order keeps the near one painting over the farther one in their column overlap.
+
+User confirmation: "Credo funzioni!" — sprite-in-world rendering live and operational.
+
+### Trap / Gotcha / Eureka (S9)
+
+- **Trap S9.1 — Watcom large model 64 KB segment cap on single arrays.** First A.14 build failed on `static BYTE __far sprites[18][4096]` (72 KB) with `E1157: Variable must be 'huge'`. The `__far` qualifier in Watcom large model places the array in a single far segment; the segment max is 64 KB. For arrays > 64 KB use `__huge` instead — Watcom splits across multiple segments and synthesizes huge-pointer arithmetic where needed. Per-row dereferences (`sprites[idx]` to a single 4 KB row) stay within one segment so the inner pixel-sample loops aren't burdened with huge-pointer cost at every access. Fingerprint for future regressions: any new `__far` BSS / data array that totals > 64 KB. Documented inline in `wolfvis_a14.c` BSS comment.
+- **Trap S9.2 — Spawn cell trap on E1L1.** First A.14 launch loaded clean (no WIN87EM regression), rendered the viewport, but the player started in BJ's spawn cell (2-tile room with one closed door). Our `IsWall` blocked all movement out — door tiles 90..101 are flagged the same as walls 1..63. Fix: split `IsBlockingForMove` from `IsWall` so movement allows passing through doors while the cast still treats them as walls. Cosmetic: the player visibly walks through a wall slab. A.14.1 polish path: implement Wolf3D-style door AI (open animation, sliding, blocking when partway). Documented in code with rationale block.
+- **Eureka S9.E1 — Painter's sort with side-arrays is the right shape for billboard rendering.** Sorting `g_objects[]` in place would shuffle ScanObjects' boot-time order across frames (no harm but loses stability for debugging). Insertion sort over a side array of `(depth, obj_idx)` pairs is O(N²) in worst case but trivially fast at MAX_OBJECTS=64 (real visible count usually 5-15), keeps `g_objects[]` order-stable, and reads cleaner than the in-place version. Same pattern will scale to dynamic enemies in a future milestone — only the side-array gets rebuilt per frame from current world state.
+- **Eureka S9.E2 — Per-row dereference dodges huge-pointer cost.** With `BYTE __huge sprites[18][4096]`, an unguarded `sprites[i][j]` would pay huge arithmetic on every pixel sample. But all our reads do `BYTE *row = sprites[idx]; row[j]` (or `row[corr_top + sy]`) where `row` is a `BYTE *` (near-segment within the 4 KB row that fits in one segment). Watcom resolves `sprites[idx]` once into a `BYTE __far *` typed result, then the `*row` reads are simple far accesses inside the single 4 KB sprite-row segment. No huge math per pixel. The inner-loop cost matches `__far` placement — the only added cost was the one-time row-segment selection. Practical lesson: `__huge` for arrays > 64 KB is fine for performance as long as inner loops dereference by row first.
+
+### Concrete results
+
+- New: `src/wolfvis_a14.c` (~1080 LOC), `src/wolfvis_a14_sintab.h` (Q15 sine LUT — copy of A.13 sintab), `src/link_wolfvis_a14.lnk`, `src/build_wolfvis_a14.bat`, `src/mkiso_a14.py`.
+- New: `cd_root_a14/` (9 files: A.13 set with WOLFA14.EXE + SYSTEM.INI updated to `shell=a:\WOLFA14.EXE`).
+- New: `build/WOLFA14.EXE` (231 KB), `build/wolfvis_a14.iso` (1.16 MB).
+- New: `snap/vis/0006.png`, `0007.png` (sprites-in-world PoC validation in E1L1).
+- README status table: A.14 ✅. Quick-start build/launch commands updated to reference A.14 binaries.
+
+### Next-step candidates for Session 10
+
+1. **A.14.1 — Door rendering + door-open AI.** Real door swing animation, slide-in-frame visual, blocking state machine. Removes the cosmetic "walking through walls" glitch from A.14. Reuses asset path: door textures are already in VSWAP at known indices. ~45-60 min.
+2. **A.13.1 — Raycaster polish.** Grid-line DDA proper (replace step-by-fraction; sub-pixel-exact texture coords; cheaper). Light-by-distance Wolf3D palette ramp. ~45-60 min.
+3. **A.15 — HUD / status bar.** BJ face, ammo, score, key icons. Reuses A.5 sprite blits + a tiny 4×6 number font. The first time the screen looks like a *game* with chrome around the viewport. ~1 h.
+4. **A.16 — Dynamic enemies.** Standing guards (obj 108..115) and patrol guards (116..127) with simple state, walk cycles, hit/death frames. Significantly larger scope — sprites with N animation frames per state, AI ticker, line-of-sight check. ~2-3 h.
+5. **A.10.1 reopen.** IMF stacchi — start from hypothesis E (other music chunks).
+
+S9 wrap recommendation: A.14.1 next (closes the cosmetic glitch this milestone ships with), then A.15 HUD for chrome polish before A.16 enemies. The "PoC playable demo" target is now architecturally one milestone away: doors that open + ammo/health box + at least one enemy that reacts.
+
+### S9 wrap-up
+
+Single milestone, single sitting, two-iteration recovery (huge qualifier + door movement split). The PoC viewport now shows the recognizable Wolfenstein 3D look — wall textures, decoration sprites at correct depth and scale, occlusion working both ways (walls hide far sprites, near sprites paint over far). Foundation chain A.1..A.13 paid off with literally one new function per added subsystem: ScanObjects (~30 lines), DrawSpriteWorld (~80 lines), DrawAllSprites (~40 lines), and a 4-line z-buffer write inside DrawWallStripCol. The "raycaster gentle" rule's structural prediction held all the way to A.14: no architectural rework, no new BSS pattern (just the `__huge` qualifier upgrade), no MAME-side regression on any prior subsystem.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Push to origin/main after commit per S9 user request.
+
+---

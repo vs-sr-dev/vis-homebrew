@@ -24,6 +24,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited in one frame | ✅ |
 | A.12 — Sprite scaler | Per-column post-walk fixed-point scaler over t_compshape sprites | ✅ |
 | A.13 — Raycaster | Textured wall casting (DDA step-by-fraction) + ceiling/floor + player nav | ✅ |
+| A.14 — Sprites in world | Static-decoration billboards over the cast scene + 1D z-buffer + painter's sort | ✅ |
 
 ## Repository layout
 
@@ -58,14 +59,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a13.bat"    # produces build/WOLFA13.EXE
-python mkiso_a13.py                 # produces build/wolfvis_a13.iso
+cmd /c ".\build_wolfvis_a14.bat"    # produces build/WOLFA14.EXE
+python mkiso_a14.py                 # produces build/wolfvis_a14.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a13.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a14.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

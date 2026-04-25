@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA14.EXE
+FILE          ..\build\wolfvis_a14.obj
+OPTION        MAP=..\build\WOLFA14.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.14 sprites in world (billboards over raycaster)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
