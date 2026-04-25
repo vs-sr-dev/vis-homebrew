@@ -460,3 +460,124 @@ S5 recommendation: **(0) mandatory perf refactor**, then (1) IMF music for the "
 S4 is the **most productive VIS project session so far** — more results than S1 (feasibility) and S3 (DispDib+palette+VSWAP) put together. Wolf3D PoC within reach: 1-2 sessions for scaler + raycaster = playable game.
 
 ---
+
+## Session 5 — 2026-04-25 — Public repo publication + Milestone A.9 (perf refactor)
+
+**Scope:** S5 opened with a declared S5 priority-1 (A.9 perf refactor — eliminate WM_KEYDOWN microfreeze before any further milestone). User added a parallel objective: bring the project under public version control on GitHub for the first time. So the session split into two parts: (1) repository publication, (2) A.9 perf refactor with a partial-blit detour.
+
+### Part 1 — Repository publication
+
+**Established workflow rules (saved as memory):**
+- Repo-committed files (this log, `README.md`, code comments, commit messages) in English. Conversation between user and assistant stays in Italian.
+- `VIS_sessions.md` must be updated **before each incremental commit** — the public repo cannot be allowed to drift between code and log.
+- MIT License chosen as default for public repos: user prioritizes "spark / temporal authorship" over downstream control.
+
+**Pre-publication scrub:**
+- Searched committed files for cross-pipeline / personal markers — sanitized 3 prose references in the sessions log to keep VIS as a self-contained project narrative.
+- Translated `VIS_sessions.md` (S1..S4) entirely from Italian to English.
+
+**Toolchain setup:**
+- `winget install --id GitHub.cli` (~14 MB, UAC required). Installed under `C:\Program Files\GitHub CLI\gh.exe`. Not added to PATH for already-open shells; called via full path for the rest of the session.
+- `gh auth login --web --git-protocol https` produced a device code (`https://github.com/login/device`); user pasted+authorized; auth completed as `vs-sr-dev` with scopes `repo + gist + read:org`.
+- `git config --global user.email` already matched the GitHub account email, so commits are author-verified out of the box without per-repo override.
+
+**`.gitignore` design (copyright-aware):**
+```
+tools/                         # Open Watcom V2 (~537 MB, fetchable)
+isos/                          # retail VIS BIN/CUE — copyright Tandy/Memorex
+vis.zip                        # MAME BIOS — copyright Tandy/Memorex
+reverse/*.bin                  # BIOS dumps + DISPDIB extract
+reverse/extracted/
+reverse/CONTROL.TAT*           # retail TAT clones — copyright Tandy
+reverse/*.tat
+reverse/*.iso
+reverse/*.exe
+docs/                          # Modular Windows SDK PDFs — copyright Microsoft
+assets/                        # Wolf3D shareware data — copyright Apogee/id
+wolf3d/                        # Wolf3D source clone — separately GPL
+build/
+cd_root*/
+cfg/
+cfg_backup_*/
+nvram/
+*.obj *.exe *.com              # Watcom intermediate
+*.pyc __pycache__/
+.DS_Store Thumbs.db
+```
+
+**Path genericization across 22 scripts:**
+- 9 `mkiso_*.py` (mkiso, _a3..a8, _dd, _step0): hardcoded `r"d:\Homebrew4\VIS\..."` replaced with `pathlib.Path(__file__).resolve().parent.parent / "<reldir>"`.
+- 2 `reverse/*.py` (extract_tat, sniff_tat) plus inspect_disc, find_tat_code, make_control_tat: hardcoded paths replaced with `__file__`-derived (`.parent` for in-dir, `.parent.parent` for sibling-dir lookups).
+- 11 `build_*.bat`: `set WATCOM=d:\Homebrew4\VIS\tools\OW` replaced with `if not defined WATCOM set WATCOM=%~dp0..\tools\OW`. Respects existing `WATCOM` env var if set globally; otherwise resolves relative to repo.
+- A separate sweep caught absolute paths in 3 prose lines of `VIS_sessions.md` (canonical MAME command, GAMEPAL.OBJ recon path, assets dir reference) — also genericized.
+
+**`README.md` written:**
+- Project intro (VIS hardware + Wolf3D port goal).
+- Status table: 8 milestones complete (S1 + A.1..A.8), A.9 next, raycaster pending.
+- Layout description with copyright callout for each git-ignored directory.
+- Quick-start: dependencies (Open Watcom V2, Python+pycdlib, MAME 0.287+, retail VIS disc for CONTROL.TAT, Wolf3D shareware), build invocation, MAME launch command.
+- Pointer to `VIS_sessions.md` for the full work log.
+
+**Commits:**
+- `7a7f07d` — Initial commit: 53 files, 4469 insertions. `gh repo create vs-sr-dev/vis-homebrew --public --source=. --remote=origin --push --description "..."`. Repo lives at https://github.com/vs-sr-dev/vis-homebrew.
+- `90555f6` — Add MIT LICENSE file. The README mentioned MIT but the file itself was missing — this left the project nominally "all rights reserved" until GitHub's licensee gem could classify the LICENSE text. After this commit the sidebar correctly shows "MIT License" with the scales icon.
+
+### Part 2 — Milestone A.9 (perf refactor)
+
+**Goal:** eliminate the ~150-200 ms microfreeze A.8 had on every WM_KEYDOWN. The bottleneck was that every input event re-rendered the full 320x200 framebuf (ClearFrame 64KB + DrawMinimap ~16K FB writes + DrawDebugBar + DrawCursor) and then InvalidateRect'd the whole window, forcing a full-screen StretchDIBits.
+
+**Architecture:**
+1. Static layer (cleared bg + minimap + minimap border) rendered once after `LoadMap()` and snapshotted into `static_bg[64000]` — a second 64 KB buffer in its own large-model data segment.
+2. Debug bar (top 30 rows, `DEBUG_BAR_H = 30`) repainted only on WM_TIMER ticks (500 ms cadence) and invalidates just `(0, 0, SCR_W, 30)`. The cursor never enters y < 35, so debug-bar refresh never disturbs cursor pixels.
+3. Cursor erase/redraw: each WM_KEYDOWN copies `static_bg → framebuf` for the previous-cursor 11x11 bbox (`RestoreFromBg(prev_x - 5, prev_y - 5, 11, 11)`), draws the cursor at the new position, and `InvalidateRect`'s only `bbox(prev) U bbox(new)`.
+
+**Per-keypress cost drop:** ~80 KB framebuf writes + full StretchDIBits → ~150 byte ops + GDI-clipped partial repaint.
+
+**StretchDIBits partial-source detour (A.9 first build, falsified):**
+
+First attempt used a partial source rect: `StretchDIBits(hdc, px, py, pw, ph, px, py, pw, ph, ...)` with `(px, py, pw, ph) = ps.rcPaint`. Visually, every keypress left the cursor's 11x11 bounding box painted at the previous position — a clear "trail" effect.
+
+Diagnosis: bottom-up DIBs (mandatory on VIS, `biHeight > 0`) interpret `YSrc` in DIB-coord space (origin at lower-left, scanline 0 = visual bottom of image). When the source rect is the *entire DIB*, `(YSrc=0, SrcHeight=H)` happens to coincide with the upper-left convention an API user might assume — so A.8's full-screen blit worked correctly. With a *partial* source rect the convention diverges: passing `YSrc = py` (top-down coords from window) reads from DIB scanlines that store visual content from the *opposite half* of the image. The framebuf bytes for the new cursor position were written correctly by `RestoreFromBg + DrawCursor`, but `WM_PAINT` was reading the wrong storage scanlines and displaying stale or unrelated pixels at the dirty rect — so the old cursor was never visually replaced.
+
+Fix: revert to full-source `StretchDIBits(hdc, 0, 0, SCR_W, SCR_H, 0, 0, SCR_W, SCR_H, ...)`. GDI clips physical screen writes to the invalid region (set by partial `InvalidateRect` from KEYDOWN/TIMER), so only the dirty pixels are actually drawn. The full-source read is ~64 KB but cheap with `DIB_PAL_COLORS` (no per-pixel color match — straight passthrough to hardware palette indices). Cursor responsiveness measurably the same as the partial-src first build, and trail eliminated.
+
+**Result:** smoke-tested in MAME 0.287 vis. User report: "molto più fluido, anni luce rispetto a prima"; after the StretchDIBits fix: "assolutamente perfetto ora, nessuna scia residua e audio confermato tutto ok". OPL3 audio and heartbeat indicator unchanged.
+
+### Concrete results (S5)
+
+- New: `src/wolfvis_a9.c` (~575 LOC), `src/link_wolfvis_a9.lnk`, `src/build_wolfvis_a9.bat`, `src/mkiso_a9.py`.
+- New: `cd_root_a9/` staging (uses A.8 file set + WOLFA9.EXE + patched SYSTEM.INI shell line). `build/wolfvis_a9.iso` (216 KB), `build/WOLFA9.EXE` (135 KB; +64 KB vs A.8 because of `static_bg`).
+- New: `LICENSE` (MIT, 2026 Samuele Voltan). `README.md`. `.gitignore`.
+- Translated and scrubbed `VIS_sessions.md` (this file).
+- Public GitHub repo `vs-sr-dev/vis-homebrew` with 3 commits: `7a7f07d` (initial), `90555f6` (LICENSE), `4a0199c` (A.9 perf refactor).
+- Memory: `feedback_repo_files_english`, `feedback_session_log_granular` (rule update for per-commit log update), `user_licensing_philosophy`, `reference_mame_path`, `reference_stretchdibits_partial_src_gotcha`, `project_milestone_A9_perf`. Updated `MEMORY.md` index.
+
+### Trap / Gotcha / Eureka (S5)
+
+- **Gotcha S5.1 — `.gitignore` first pass missed copyright artifacts:** initial pattern `reverse/control_tat_*.bin` (lowercase, underscore) failed to match the actual filenames `CONTROL.TAT.Atlas`, `CONTROL.TAT.Bible`, `CONTROL.TAT.Fitness` (uppercase, dot-separated). Plus `reverse/atlas.iso` and `reverse/atlas_gprs.exe` (retail extracts) weren't covered. Discovered during dry-run staging review **before** the first commit — would have leaked retail Tandy material to a public repo otherwise. Lesson: always `git add . && git status` and read the staged list line by line before the first commit on any new repo, especially with copyright-mixed working trees.
+- **Gotcha S5.2 — Hardcoded absolute paths in many scripts:** 11 mkiso_*.py + 2 reverse/*.py + 11 build_*.bat all had `d:\Homebrew4\VIS\...` hardcoded. The first grep used a slightly off escaping and underreported (only 3 hits). A second pass with a different pattern caught them all. Genericized via `__file__` (Python) and `%~dp0` (batch). Lesson: when sweeping for path leaks, run multiple distinct patterns — single grep can underreport.
+- **Gotcha S5.3 — sed in Git Bash + `\` paths:** `sed -i 's|d:\\Homebrew4\\...|...|'` produced no matches even though grep confirmed the pattern was present. Suspected MSYS2 path-conversion of `d:\` arguments. Workaround: dropped sed, used a small Python one-liner via `pathlib.glob` + `read_text/write_text`. Lesson: don't trust sed for backslash-heavy Windows path edits in MSYS2.
+- **Gotcha S5.4 — `gh` not on PATH after winget install:** new console / Git Bash session doesn't pick up the modified PATH until restart. Worked around by calling `"/c/Program Files/GitHub CLI/gh.exe"` with full path for the rest of the session. Memory `reference_mame_path` documents an analogous case for `mame.exe`.
+- **Gotcha S5.5 — Bottom-up DIB + partial source rect in StretchDIBits:** central A.9 bug; documented as `reference_stretchdibits_partial_src_gotcha`. Always use full-source `StretchDIBits` for biHeight>0 DIBs and rely on `InvalidateRect` to clip physical writes.
+- **Gotcha S5.6 — `LicenseInfo: null` on first `gh repo view` after LICENSE push:** GitHub's licensee gem hadn't reindexed yet. Sidebar showed "MIT License" within seconds anyway — `gh` just returned stale cached metadata.
+- **Eureka S5.E1 — Watcom large-model handles a second 64 KB buffer transparently:** `static BYTE static_bg[64000]` next to the existing `framebuf[64000]` compiled and ran without any `__far` / `__huge` annotation, no segment-overflow warning, no runtime issue. Watcom puts each 64 KB array in its own data segment automatically.
+- **Eureka S5.E2 — GDI clipping makes "full-source partial-dest blit" effectively as fast as a true partial blit on small dirty regions:** the readout of 64 KB src is dwarfed by the savings from not having to recompute the framebuf. Combined with `DIB_PAL_COLORS` (zero per-pixel color match), the practical perf is dominated by the size of `InvalidateRect`'s rect, not by the StretchDIBits source size.
+- **Eureka S5.E3 — VIS_sessions.md scrub before publication is non-trivial:** even a careful initial pass missed 3 absolute-path leaks in prose lines. The git remote being public makes every paragraph a potential leak surface, not just code.
+
+### Next-step candidates for Session 6
+
+After A.9, the **S4 list still applies** but A.9 has changed the picture: the foundation is now performant enough to support animations, audio polling, and eventually the raycaster.
+
+1. **A.10 — AUDIOT.WL1 parser + IMF playback.** Headline emotional milestone: Wolfenstein 3D theme playing on Tandy/Memorex VIS hardware. Format: AUDIOHED.WL1 = chunk offsets/lengths, AUDIOT.WL1 = packed chunks with the music tracks at the end (after PC-speaker SFX, AdLib SFX, digitized SFX). IMF stream = `WORD prefix_length` then `(reg, val, delay_word)` triples at 700 Hz tick rate. Scheduling tradeoff: WM_TIMER + accumulator drift (good enough for smoke) vs `timeSetEvent` from MMSYSTEM (ms-precise but needs MMSYSTEM linkage).
+2. **A.11 — Unified integrated scene.** Walls + sprites + minimap + cursor + click-sounds together. Demonstrative consolidation pre-raycaster: all the A.3..A.8 + A.9 primitives composited into one scene. No new tech, just careful integration.
+3. **A.12 — Scaler port.** Port `WL_SCALE` / `OLDSCALE.C` simple-path so `DrawSprite` can render at variable size. Final step before the raycaster, since the raycaster relies on per-column scaled wall slices.
+4. **A.13 — Raycaster.** Last (per the "be gentle with the raycaster" rule). Map grid in memory (plane0), palette + textures + sprites + framebuf + input + audio all present and proven.
+5. **`hcControl HC_SET_KEYMAP`** — remap VK_HC1_* slots back to standard VK codes for ergonomic switch-cases. Cosmetic, not critical.
+
+S6 recommendation: (1) IMF music — concise scope, big perceived "Wolf3D on VIS" moment; if scheduler accuracy is a problem, fall back to MMSYSTEM and mark as a sub-milestone.
+
+### S5 wrap-up
+
+Two distinct deliverables in one session: (a) project went from local-only to public open-source on GitHub with proper licensing, copyright hygiene, and English documentation; (b) A.9 perf foundation closes a real input-lag problem and unlocks animations / scheduler work. The A.9 partial-blit detour cost ~15 minutes but produced a memory-recorded gotcha that will save time on every future Win16 VIS app touching `StretchDIBits`. Pacing was uneven (Part 1 took longer than expected because of the multi-pass copyright scrub), but no scope was deferred. Workflow rule "VIS_sessions.md updated before each commit" established for going forward — adopted starting with the next milestone (A.10).
+
+---
