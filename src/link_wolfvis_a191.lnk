@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA191.EXE
+FILE          ..\build\wolfvis_a191.obj
+OPTION        MAP=..\build\WOLFA191.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.19.1 sprite scaler Q.16 accumulator (close-enemy freeze fix)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

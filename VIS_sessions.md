@@ -2009,3 +2009,81 @@ The programmers_ref.txt discovery is a high-value side effect. EnterDVA + _A000h
 Workflow rule re-confirmed (4th time): code + VIS_sessions.md + README.md + memory in the same commit.
 
 ---
+
+## Session 15 (cont.) — 2026-04-25 — Milestone A.19.1 sprite scaler Q.16 accumulator
+
+### Scope
+
+Direct continuation of S15 immediately after A.19 commit (user: "Direi di proseguire, così poi facciamo un push unico"). Closes H1 — the sprite-divisor explosion that A.19 left untouched and that surfaced as a hard freeze on close-enemy encounters.
+
+The pre-S15 hot-path sweep had identified `DrawSpriteWorld` inner loop's per-pixel `sy_src = (long)(dy - dy_top) * 64L / sprite_h` as the dominant residual cost. With sprite_h saturated at 4*VIEW_H = 512 px (cam_y near-clip), an 80-column sprite at ~256 visible pixels per column ran ~10 M cycles per sprite per frame — perceived as a >1 s freeze. The fix is the canonical Q.16 step accumulator pattern that `DrawWallStripCol` has used since A.13.1: compute `step_q16 = (64L << 16) / sprite_h` once per sprite, then walk per-pixel via `sy_acc += step_q16; sy = sy_acc >> 16`.
+
+### Recon
+
+Zero external recon — pattern is in-codebase reference (`DrawWallStripCol` lines 2541-2566 of A.19 baseline). The wallstrip code already does what sprites needed; the asymmetry of "walls fast, sprites slow" was the root reason A.18+ guards "froze" instead of slowing proportionally. Recon-first paid off again at zero cost.
+
+### Implementation (~30 min)
+
+Single source file `src/wolfvis_a191.c` (~3470 LOC, +60 LOC vs A.19). One function rewritten end-to-end (DrawSpriteWorld), four additive changes inside it:
+
+- **Step accumulator**. `step_q16 = (64L << 16) / sprite_h` computed once per sprite. `srcx_acc` and `sy_acc` (long Q.16) walk the source coords. Per-pixel cost: 1 long add + 1 right-shift + 2 defensive compares + 1 byte store. Replaces 1 long div per pixel (~150 cyc on 286) with ~5-10 cyc.
+- **Pre-clipped dy bounds**. `dy_iter_start = max(dy_start, VIEW_Y0); dy_iter_end = min(dy_end, VIEW_Y0 + VIEW_H)` once per post. Inner loop is bound-check-free. For close sprites (dy_start can be -150, dy_end can be 320) this clips to dy_iter_start=35, dy_iter_end=163 = ~128 actually-rendered pixels per column instead of 470 iterated-then-skipped.
+- **Decrementing far pointer**. `fb = framebuf + ((SCR_H - 1) - dy_iter_start) * SCR_W + sx`; per-pixel `*fb = sprite[src_idx]; fb -= SCR_W;`. Mirrors the wallstrip pattern. Eliminates the per-pixel `(unsigned)fb_y * (unsigned)SCR_W + (unsigned)sx` long mul.
+- **Per-column srcx via accumulator**. `srcx = (int)(srcx_acc >> 16); srcx_acc += step_q16;` — same step value as sy. Eliminates the per-column `(long)(dest_col - dest_left) * 64L / sprite_h` long div + long mul.
+
+Defensive sy clamp kept (`if (sy < starty_src) sy = starty_src; else if (sy >= endy_src) sy = endy_src - 1;`) — Q.16 rounding can push sy outside the post bounds at large step values.
+
+Window class `WolfVISa19` → `WolfVISa191`.
+
+### Build
+
+- Compile + link: clean, single-iteration zero-fix. `WOLFA191.EXE` 230 KB (+32 bytes vs A.19 — accumulator state is ~8 stack longs, irrelevant). `wolfvis_a191.iso` 1.46 MB (same asset bundle).
+- No traps. PowerShell tool with absolute path to build batch worked first try (S12 trap pattern internalized).
+- MAME launch with `-rompath` + `-skip_gameinfo` worked first try (A.19 trap pattern internalized).
+
+### Result
+
+User test verdict: "Tutto bene, il rallentamento con guardia vicina *rimane*, ma è meno bloccante rispetto a prima (nessun freeze, solo drop fps). Il resto tutto OK."
+
+Two confirmations:
+
+1. **Freeze killed.** H1 closed. The 10 M cyc/frame sprite-divisor explosion is gone. Close-quarters combat is now testable in real-time.
+2. **Residual drop is linear pixel volume.** With sprite_h=512, the inner loop still pumps ~80 cols × 128 rows = 10240 pixel writes per close sprite at ~25 cyc per pixel (mostly the far-pointer `*fb = sprite[src_idx]` byte-store + the `sy_acc += step_q16` long add). That's ~250 k cyc per sprite ≈ 20 ms on the 12 MHz 286. With 1-2 close sprites visible the frame budget overhead is 20-40 ms on top of the ~150 ms ordinary baseline = perceptible drop, not a freeze. Same drop pattern as a vanilla VGA-DOS Wolf3D on a 286: scenes scale linearly with pixel count, but no single operation explodes.
+
+The remaining headroom for close-quarters perf:
+- **A.19.2 pre-clipped dest_col loop**. The outer column loop iterates dest_left..dest_right (potentially -200..312 = 512 iterations) but only paints ~128 in-viewport. Pre-clipping the loop bounds AND seeding srcx_acc accordingly skips ~3-4 ms of wasted iterations per close sprite.
+- **A.19.2 WORD ceiling/floor + top-down DIB**: same micro-wins for walls, ~5-10 ms.
+- **A.21 EnterDVA direct-A000:0000**: eliminates StretchDIBits entirely, projected 30-50% savings. Largest remaining bet.
+
+### Trap / Gotcha / Eureka (S15.A.19.1)
+
+- **Eureka S15.A.19.1.E1 — "asymmetric perf is a smell".** Walls (DrawWallStripCol) ran the accumulator pattern since A.13.1; sprites (DrawSpriteWorld) ran a per-pixel division. The fact that walls were fast and sprites slow was the visible signature of the asymmetry — close sprites froze because they paid a different per-pixel cost than walls of the same screen extent. Pattern: when one similar-shape primitive is fast and another similar-shape primitive is slow, the fast one is the canonical reference; port the slow one to it. The symmetry was hiding in plain sight.
+- **Eureka S15.A.19.1.E2 — Q.16 step is the universal screen→source mapping**. `step_q16 = (64L << 16) / sprite_h` works for both srcx (per-col) AND sy_src (per-pixel). Both axes scale identically because the sprite is a 64×64 source rendered at sprite_h × sprite_h target. One precomputed step serves both walks. Same single-step-mapping applies in DrawWallStripCol (sy_step) and could be extended to a future scaled fixed-overlay if added.
+- **No iteration cycles.** Recon-first now 10-for-10 (single-iter zero-fix from the in-codebase reference pattern). The fix wrote correctly first try because the pattern was tested in DrawWallStripCol.
+
+### Concrete results
+
+- New: `src/wolfvis_a191.c` (~3470 LOC, +60 vs A.19), `src/build_wolfvis_a191.bat`, `src/link_wolfvis_a191.lnk`, `src/mkiso_a191.py`.
+- New: `cd_root_a191/` (12 files: A.19 set with `WOLFA191.EXE` + `SYSTEM.INI` updated `shell=a:\WOLFA191.EXE`).
+- New: `build/WOLFA191.EXE` (230 KB), `build/wolfvis_a191.iso` (1.46 MB).
+- README: A.19.1 row added, quick-start updated to A.19.1.
+- Memory: `project_milestone_A191_sprite_scaler.md` (NEW), `MEMORY.md` index updated.
+
+### Next-step candidates for Session 15 cont. or Session 16
+
+Updated priority list (post-A.19.1):
+
+1. **A.19.2 — dest_col pre-clip + WORD ceiling/floor + top-down DIB**. Three small wins bundled. Skip dest_col iterations outside viewport + WORD-pair store for ceiling/floor in DrawWallStripCol + flip biHeight sign so y axis is top-down (eliminates `(SCR_H - 1) - dy` inversion in remaining FB callers). Estimated ~10-15 ms freed total. ~45 min impl.
+2. **A.19.3 — Split telemetry**. 5 PIT-direct sub-counters (cast / wall / sprite / overlay / paint). Now MEANINGFUL because the two big known costs (H1 sprite div, H2 minimap) are gone — telemetry will isolate the remaining bottleneck cleanly. ~30-45 min.
+3. **A.21 — EnterDVA direct A000:0000 framebuffer**. Programmer's_ref.txt API doc already grep'd; recon complete. Replace StretchDIBits with raw byte writes to A000:0000. **Probably the largest remaining single win** (30-50% projected on top of all micro-opts). ~1.5-2 h.
+4. **A.20 — Enemy firing back + player health** (was original A.19 scope). Now testable in close quarters thanks to A.19.1. ~1.5-2 h.
+
+S15 cont. recommendation: **A.20 next** if user wants to close the gameplay loop symmetrically; **A.19.2 + A.19.3 + A.21** if user wants to push further on perf before adding gameplay. The "QUASI giocabile" + "no freeze" combination from A.19/A.19.1 is a natural pause point — both gameplay and perf paths are now viable next moves.
+
+### S15 cont. wrap
+
+Two milestones bundled in one session continuation, both single-iter zero-fix, total ~80 min real-time. The combination A.19 (kill H2 hot path) + A.19.1 (kill H1 sprite divisor) collapses both pre-identified perf killers from the S15 opening sweep. Recon-first now 10-for-10. Workflow rule preserved: code + VIS_sessions.md + README.md + memory in the same commit (one commit per milestone in the bundle).
+
+The user pacing pattern S15 worth recording: open with strategic deviation ("layout first not telemetry"), validate at each milestone with quick visual+perceptual feedback ("QUASI giocabile" / "no freeze, solo drop fps"), continue chaining as long as wins keep coming. Distinct from S14 pattern (one-milestone-per-session-then-stop) — the smaller per-milestone scope here (~30 min impl each) lets us bundle without fatigue.
+
+---
