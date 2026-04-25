@@ -1655,3 +1655,79 @@ Single iteration, zero fixes. The recon pass took 10 minutes; the implementation
 The "horror stare" gameplay artifact is the cleanest possible signal that the AI loop closes correctly: enemies see the player → walk to him → reach melee range → stand. Adding firing in A.18 will turn the same loop into actual combat without changing any of the A.16b plumbing.
 
 ---
+
+## Session 13 (cont.) — 2026-04-25 — Milestone A.17 weapon overlay
+
+### Scope
+
+Visual milestone, S13 stretch. Pistol sprite painted at viewport bottom-center every frame, foreground-on-top of raycaster + in-world sprites. Static (no firing animation, no input rebind). Two iterations: iter-1 shipped a primitive `FillRect` silhouette (pattern A.15 face_placeholder) and proved the layout; iter-2 replaced it with the canonical `SPR_PISTOLREADY` chunk loaded from VSWAP at boot.
+
+### Iter 1 — primitive pistol (~30 min)
+
+Quick `FillRect`-based silhouette: 32x36 px gun shape with mid-gray slide, brown grip, dark trigger guard, 1-px black outline. Pattern matched A.15 `DrawFacePlaceholder` exactly: ~14 `FillRect` calls, no asset data, drawn after `DrawAllSprites()` in `DrawViewport()` so it's always foreground.
+
+User verdict: *"L'hai disegnata tu immagino? :D :D"* — the fan-art look was instantly recognizable. Visual PoC accepted, but for a public repo a real Wolf3D sprite is preferable. Decision: upgrade in same session.
+
+Build: clean except a `W131: No prototype` warning (DrawWeaponOverlay defined after its caller `DrawViewport`). Fixed via a one-line forward declaration before `DrawViewport`.
+
+### Iter 2 — VSWAP-loaded SPR_PISTOLREADY (~20 min)
+
+The user-attack sprite frames live in VSWAP, not VGAGRAPH (initial assumption was wrong — VGAGRAPH holds GUNPIC for the HUD-status icon, but the in-viewport overlay frame is a 64x64 t_compshape sprite same as enemy frames). They sit at the trailing end of the WL1 sprite enum (`WL_DEF.H:457-468`):
+
+```
+SPR_KNIFEREADY .. SPR_KNIFEATK4   (5 frames)
+SPR_PISTOLREADY .. SPR_PISTOLATK4 (5 frames)
+SPR_MACHINEGUNREADY .. ATK4       (5 frames)
+SPR_CHAINREADY .. CHAINATK4       (5 frames)
+```
+
+20 trailing frames total, `SPR_PISTOLREADY` at offset +5 = `total_sprites - 15` from the end. `total_sprites = sound_start_idx - sprite_start_idx` is parsed from the VSWAP header at boot.
+
+Plumbing:
+
+- `NUM_SPRITES` bumped 58 → 59. Slot 58 = `PISTOL_READY_SLOT`.
+- `sprite_chunk_offs[]` was `static const`, became `static` (mutable). Slot 58 carries `0` as compile-time placeholder.
+- After `LoadVSwap()` parses the header but before the load loop runs, a runtime patch sets `sprite_chunk_offs[PISTOL_READY_SLOT] = total_sprites - PISTOL_READY_OFFSET (15)`. Bounds-checked: if the computed offset goes negative or exceeds the sprite range, the patch is skipped and the slot stays empty (DrawSpriteFixed silently no-ops on empty slots).
+- New `DrawSpriteFixed(sx, sy, sprite_idx)`: 1:1 screen-coord blit. Walks the same `t_compshape` post format as `DrawSpriteWorld` (leftpix/rightpix/dataofs/post triples) but with no scale, no z-buffer, no projection — just direct framebuffer writes at `(sx + srcx, sy + sy_src)`.
+- `DrawWeaponOverlay()` rewritten: one call to `DrawSpriteFixed(32, 99, PISTOL_READY_SLOT)` — 64x64 sprite centered horizontally in the 128x128 viewport, bottom flush at viewport y=162 (one px above HUD top).
+
+Build: clean. EXE 256 KB (+5 KB vs A.16b — the new blit helper + 4 KB sprite slot).
+
+### Result
+
+Snapshot `snap/vis/0025.png`: the canonical Wolf3D pistol idle silhouette at viewport bottom-center. Small visible region (~12x12 px of opaque pixels in the 64x64 sprite) because vanilla `SPR_PISTOLREADY` is artistically the slide-top-down view that the player sees holding the gun in hand — the firing frames `ATK1..4` are the raised-with-muzzle-flash poses that fill more of the frame. This is correct vanilla appearance; the gun appears proportionally small in idle because Wolf3D's viewport is 304x152 (half-screen) and the pistol is "casual hold" art.
+
+User verdict: *"Confermato! Guarda snap"*. Chunk discovery `total_sprites - 15` is correct for WL1 shareware.
+
+### Trap / Gotcha / Eureka (S13.A.17)
+
+- **Eureka S13.A.17.E1 — VSWAP, not VGAGRAPH, holds the in-viewport weapon sprites.** Initial recon assumed VGAGRAPH (because `GUNPIC = chunk 100` in `GFXE_WL1.H` looks weapon-related). That's the HUD-status icon (32x16 thumbnail in `WL_AGENT.C:546 StatusDrawPic`). The actual in-viewport overlay routes through `SimpleScaleShape` with sprite shapenum from `attackinfo[].frame`, which indexes into the VSWAP sprite enum. Pattern: when looking up a Wolf3D asset, distinguish HUD-status pics (VGAGRAPH chunked Huffman) from in-viewport sprites (VSWAP `t_compshape` posts). The HUD path is much heavier (Huffman + 4-plane EGA decode); the in-viewport path is identical to what we already have for enemy/decoration sprites.
+- **Eureka S13.A.17.E2 — Mutable `sprite_chunk_offs[]` + runtime patch is the right pattern for variable-position enum entries.** WL1 vs WL6 vs SOD have different sprite enum layouts (SOD/SDM add `SPR_SPECTRE..ANGEL_DEAD` before the player frames, shifting the indices). Hardcoding `SPR_PISTOLREADY` would break on a different IWAD; runtime discovery via `total_sprites - PISTOL_READY_OFFSET` makes the loader portable. For A.18+ we can extend the same pattern: `sprite_chunk_offs[59..62] = total - 14..-11` for `SPR_PISTOLATK1..4`.
+- **No traps in iter-2.** Build was clean first try; chunk discovery hit the right chunk; sprite displayed correctly. Single forward-decl warning carried over from iter-1, already fixed.
+- **Note on visible silhouette size.** Vanilla `SPR_PISTOLREADY` has a small opaque region (~12 columns) in a 64-wide sprite — the rest is transparent. At 1:1 in our 128-wide viewport, the visible gun is small. This is correct. A.18 firing frames will paint more of the frame (raised-arm pose with muzzle flash). Optional polish: scale-up the blit ~1.5x to make the gun more prominent in our smaller viewport — but that risks looking outsize for vanilla feel. Defer.
+
+### Concrete results
+
+- New: `src/wolfvis_a17.c` (+~110 LOC vs A.16b), `src/build_wolfvis_a17.bat`, `src/link_wolfvis_a17.lnk`, `src/mkiso_a17.py`.
+- New: `cd_root_a17/` (9 files: A.16b set with `WOLFA17.EXE` + `SYSTEM.INI` updated `shell=a:\WOLFA17.EXE`).
+- New: `build/WOLFA17.EXE` (256 KB), `build/wolfvis_a17.iso` (1.19 MB).
+- New: `snap/vis/0023.png` (iter-1 primitive), `snap/vis/0024.png`, `snap/vis/0025.png` (iter-2 vanilla SPR_PISTOLREADY).
+- README: A.17 row added, quick-start updated to A.17.
+- Memory: `project_milestone_A17_weapon.md` (NEW), `MEMORY.md` index updated, `project_S14_todo_opening.md` updated to re-elevate A.15.1 BJ face per user reminder.
+
+### Next-step candidates for Session 14
+
+1. **A.18 — Firing + hitscan + damage** (~1.5-2 h). Default S14 scope. Hot-swap `PISTOL_READY_SLOT` for `SPR_PISTOLATK1..4` at fire-rate cadence (same runtime patch pattern); hitscan ray from player center; first-hit via z-buffer scan; damage application + ammo decrement + score increment. PRIMARY rebinds door→fire.
+2. **A.15.1 — Real BJ Blazkowicz face on HUD** (~1-1.5 h). Re-elevated per user reminder. VGAGRAPH chunked Huffman loader (separate from VSWAP) — chunks `FACE1APIC..FACE3CPIC` give the 8 hp-state face frames for status bar. Could be S14 head warm-up before A.18 main scope.
+
+### S13 total wrap-up (A.16b + A.17)
+
+Two milestones in one session, three iterations total (A.16b single iter, A.17 two iters). All zero-fix on the technical side: each compile cycle was clean, each MAME launch worked, no chirality bugs or DGROUP overflows. Recon-first now 6-for-6 on multi-subsystem milestones.
+
+Time invested: ~2 h real-time S13 (recon 10 min + A.16b impl 45 min + A.17 iter-1 30 min + A.17 iter-2 20 min + wrap 30 min for both). Within the original S13 1.5-2 h budget despite the stretch.
+
+User experience arc: A.16b "horror stare" → A.17 fan-art pistol → A.17 vanilla pistol. The session closed with the user comfortable enough to confirm both visually-significant milestones, including a one-shot "yeah that primitive looks like you drew it" detection that triggered the upgrade to vanilla art mid-session — proof the public-repo polish bar matters.
+
+Push: A.16b commit `2d9e905` pushed mid-session at user direction. A.17 to be pushed after wrap.
+
+---
