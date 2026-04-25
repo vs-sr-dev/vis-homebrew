@@ -1083,3 +1083,106 @@ This is the third known HC quirk after the A.8 "must call hcGetCursorPos to keep
 **Concrete delta:** modified `src/wolfvis_a14.c` (+57 lines: PollHeldKeysFromAsync helper, ApplyHeldMovement helper, WM_TIMER restructure, SetTimer 500→50 ms, debug bar throttle). EXE 231 KB unchanged size class. ISO rebuild + MAME test, single iteration.
 
 ---
+
+## Session 10 — 2026-04-25 — Milestone A.14.1 (doors)
+
+**Scope:** close the only cosmetic regression A.14 shipped with — the player visibly walking through wall slabs at door tile positions. Reuse the foundation: door textures live in VSWAP at known indices, the column-walk wall-strip renderer can sample any 64×64 page, the cast already enters door tiles (it just couldn't distinguish them from walls). Goal: make doors first-class with sliding-slab animation, PRIMARY-button toggle, and movement-blocking that gates on open extent.
+
+User selected scope at session open from the three S10 candidates (A.14.1 doors / A.15 HUD / A.16 enemies) — A.14.1 first, isolated from layout changes ("rifare layout in mezzo al door work raddoppia lo scope"). Layout invariant kept across the whole milestone: viewport 128×128, debug bar 30 px, minimap 64×64. Perf sweep stays deferred to post-A.16 per S9 wrap.
+
+### Door tile inventory + texture index (from vanilla Wolf3D source)
+
+Door tile values in `map_plane0` are 90..101 with even/odd encoding orientation:
+- **Vertical doors** (slab runs N–S, slides on Y axis): 90, 92, 94, 96, 98, 100. Lock type = `(tile-90)/2`.
+- **Horizontal doors** (slab runs E–W, slides on X axis): 91, 93, 95, 97, 99, 101. Lock type = `(tile-91)/2`.
+
+Door textures in VSWAP start at chunk `sprite_start_idx - 8` — vanilla Wolf3D defines `DOORWALL = (PMSpriteStart-8)` in `WL_DRAW.C`. The 8-page DOORWALL bank holds: +0 normal door slab (PoC uses just this), +2/+3 door-side wall variants (when a wall is adjacent to a door), +4 elevator door, +6 locked door. PoC ignores all variants — every door tile renders with the same single 64×64 page.
+
+### Subsystems added vs A.14
+
+- **`door_tex[4096] __far`** — single 64×64 page loaded from VSWAP at chunk `sprite_start_idx - 8`. Loaded inside `LoadVSwap` after the sprite block. `gDoorTexErr` separate from `gVSwapErr` so a missing door page doesn't fail the whole VSWAP load.
+- **`g_door_amt[MAP_TILES] __far`** + **`g_door_dir[MAP_TILES] __far`** — per-tile state. `amt` is open extent in 1/64 tile (0=closed, 64=open). `dir` is `IDLE/OPENING/CLOSING`. 8 KB total in BSS, well within DGROUP budget after A.14's `__huge sprites` move.
+- **`IsDoor(tx, ty)`** — returns 1=vertical, 2=horizontal, 0=not a door. Used by `CastRay` and `ToggleDoorInFront`.
+- **`IsBlockingForMove`** rewritten — walls always block; doors block iff `amt < DOOR_BLOCK_AMT` (=56/64, ≈ 0.875 open). Matches vanilla Wolf3D's "doors block until ~7/8 open" feel and prevents the player from getting trapped by a half-closing slab.
+- **`AdvanceDoors()`** — sweeps `MAP_TILES` once per WM_TIMER tick, advances any non-idle door by `DOOR_STEP=2` per tick. Full open/close transition = 32 ticks × 50 ms = 1.6 s. Returns BOOL so the caller can invalidate the viewport when state changed.
+- **`ToggleDoorInFront()`** — projects one tile-unit forward along player heading, looks up the tile, toggles its `dir`. Reverses mid-animation if pressed during open/close (so a panic-slam works).
+- **CastRay door branch** (the centerpiece): inside the per-sub-step loop, before the standard wall-hit check, evaluate door slab. If we're traversing a door tile (or just entered one) and the ray crossed the slab's mid-plane in this sub-step, interpolate the perpendicular axis at the crossing, and hit-test against `amt_q16 = (amt << 16) / 64`. If `perp_frac >= amt_q16`, return DOOR_TEX_IDX as the texture sentinel + `tex_x = perp_frac * 64`. Else the ray passes through the open portion and casting continues to the far wall.
+- **`DrawWallStripCol`** — recognizes `tex_idx == DOOR_TEX_IDX` (= `WALL_COUNT` = 8) and samples `door_tex[]` instead of `walls[tex_idx_clamped]`. Everything else (wall_h calc, ceil/floor fill, sy_step inner loop) unchanged.
+- **PRIMARY button repurposed** — was OPL channel-0 click since A.8 (sanity-check sound). Now triggers `ToggleDoorInFront`. SECONDARY's OPL click kept as the audio-stack canary.
+- **Minimap door coloring** — door tiles render as orange-176 closed, light-orange-178 animating, green-105 open. Doubles the minimap as a "where can I walk now" indicator without a separate HUD.
+
+### Cast geometry detail (the trickiest piece)
+
+For each sub-step the loop saves `last_pos_x_q16`/`last_pos_y_q16` before the `+= sub_dx/dy` advance. Door check picks one tile:
+- If we were already in a door tile (`IsDoor(prev_tx, prev_ty)`), test against THAT tile's mid-plane.
+- Else if we just entered one (`IsDoor(tx, ty)`), test against THE NEW tile's mid-plane.
+
+The mid-plane is at `mid_q16 = (d_tx << 16) + 0x8000` for vertical doors (X-axis crossing), `(d_ty << 16) + 0x8000` for horizontal (Y-axis crossing). Crossing detection is the standard `(prev < mid && pos >= mid) || (prev >= mid && pos < mid)`. When crossed, linear-interpolate the OTHER axis at the crossing point: `t_q16 = ((mid - axis_prev) << 16) / (axis_pos - axis_prev)`, then `perp_at_mid = perp_prev + ((perp_pos - perp_prev) * t_q16) >> 16`.
+
+Three early-outs keep false hits out:
+1. `denom == 0` (zero-length axis projection — degenerate ray).
+2. `(perp_at_mid >> 16) != perp_tile_expected` — the crossing landed in a tile *neighboring* the door tile (the ray was oblique enough to clear the door diagonally).
+3. `perp_frac_q16 < amt_q16` — the crossing landed in the open portion of the slab; ray passes through and standard sub-step cast resumes.
+
+Distance to hit uses the same `dx/cos` (vertical door) or `dy/sin` (horizontal) projection the wall hit uses, so the sprite z-buffer reads the right values and walls past the door still occlude correctly.
+
+### Door state machine semantics
+
+- `IDLE` + `amt == 0` → tap PRIMARY → `OPENING`. Each tick `amt += 2` until `amt == 64` → `IDLE`.
+- `IDLE` + `amt == 64` → tap PRIMARY → `CLOSING`. Each tick `amt -= 2` until `amt == 0` → `IDLE`.
+- `OPENING` mid-anim → tap PRIMARY → `CLOSING` (panic-slam).
+- `CLOSING` mid-anim → tap PRIMARY → `OPENING` (rescue).
+- Movement gate: `amt < 56` blocks. So during the last 8 ticks of opening (~400 ms), the player can already walk through.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a141.obj wolfvis_a141.c` — clean, no warnings, no `__huge`-related E1157 (door BSS is well under 64 KB).
+- Link: `wlink @link_wolfvis_a141.lnk` — same `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` as A.8+.
+- Output: `build/WOLFA141.EXE` 245 KB (+14 KB vs A.14 for door state arrays + door check in CastRay + door advance helper), `build/wolfvis_a141.iso` 1.16 MB.
+
+### Result
+
+Confirmed working on MAME 0.287 vis on first build attempt — no fix iterations. Snapshots `snap/vis/0011.png`, `0012.png`:
+
+- 0011: door slab fully closed in front of the player. Cyan/teal Wolf3D door texture with side rivet plates, perspective-scaled correctly, flanked by Hitler-poster wall textures on both sides at the same depth. Minimap shows the door tile in orange (closed). Perf bar mostly red — the cast just got more expensive.
+- 0012: door slab mid-animation, partially retracted upward — the slab now covers only the lower ~60% of its tile, with the floor visible through the upper open portion. Texture preserved during slide. Player visibly moving toward the door.
+
+User confirmation: "Tutto confermato! Slab scorre... mooolto, moooooooolto lentamente (2-3 frame al secondo), ma scorre!"
+
+The 2–3 FPS is the expected continuation of A.14's 4–5 FPS plus the per-sub-step door check on every column × every step. Perf sweep is deliberately deferred per S9 wrap to post-A.16.
+
+### Trap / Gotcha / Eureka (S10)
+
+- **Trap S10.1 — MAME launched without `-rompath`.** First MAME launch failed instantly: "Required files are missing, the machine cannot be run" with `p513bk0b.bin NOT FOUND` / `p513bk1b.bin NOT FOUND`. Project-root has both `vis.zip` (the BIOS ROM set MAME wants) and the loose extracted bins under `reverse/`. Default rompath doesn't include the project root. Fix: pass `-rompath .` so MAME finds `vis.zip` next to the cwd. Same lesson as the `mame_snapshot_path` memo from S6: always launch from the project root with explicit `-rompath .` for VIS work. (Adding to README's run command for future sessions.)
+- **Eureka S10.E1 — First-attempt-pass on a non-trivial new subsystem.** A.14.1 added door textures (LoadVSwap mod), state arrays (BSS), state machine (AdvanceDoors), input (ToggleDoorInFront, PRIMARY rewire), cast logic (door branch in CastRay), render path (DOOR_TEX_IDX in DrawWallStripCol), and minimap UI (door state coloring) — and built clean + ran correctly on the very first MAME launch. No trap-fix-rebuild iteration. Two factors made this possible:
+  1. **Reading the vanilla Wolf3D source first** (`WL_DRAW.C HitVertDoor/HitHorizDoor` for the DOORWALL chunk index, `WL_GAME.C` case 90..101 for the orientation parity) → no guessing on data formats or magic numbers.
+  2. **A.14's split of `IsWall` vs `IsBlockingForMove` already prepared the codebase for door state**: doors were already a separately-handled tile class, just with a placeholder behavior. A.14.1 just filled in the placeholder. The S9 "conscious PoC trade-off" memo paid off one milestone later.
+- **Eureka S10.E2 — Sentinel-as-tex-idx pattern stays clean as the renderer grows.** Reserving `DOOR_TEX_IDX = WALL_COUNT` (one past the legal walls range) means CastRay's `out_tex_idx` is always the right value for DrawWallStripCol regardless of source: walls 0..7 → walls[idx], 8 → door_tex. No new parameter to plumb through the cast → render boundary. Same pattern will scale: pushwalls, secret doors, and elevator-end-floors can each take a sentinel slot with zero plumbing change. The renderer stays strictly column-walk-with-source-swap.
+- **Eureka S10.E3 — Mid-plane interpolation is the right abstraction for "thin walls inside a tile".** The door slab sits at the tile center, perpendicular to the door axis. By saving `last_pos` before each sub-step and detecting mid-plane crossings with linear interpolation, the cast handles the door regardless of step granularity, ray direction, or sub-step alignment. The same primitive directly applies to: pushwalls (slab parallel to a tile edge instead of mid-plane), thin-window decorations, half-height obstacles. Cost is one extra crossing test per sub-step, well-amortized vs the cast's existing per-step work.
+
+### Concrete results
+
+- New: `src/wolfvis_a141.c` (~1280 LOC, +130 vs A.14), `src/wolfvis_a141_sintab.h` (copy of A.14 sintab), `src/link_wolfvis_a141.lnk`, `src/build_wolfvis_a141.bat`, `src/mkiso_a141.py`.
+- New: `cd_root_a141/` (9 files: A.14 set with `WOLFA141.EXE` + `SYSTEM.INI` updated to `shell=a:\WOLFA141.EXE`).
+- New: `build/WOLFA141.EXE` (245 KB), `build/wolfvis_a141.iso` (1.16 MB).
+- New: `snap/vis/0011.png` (door closed), `snap/vis/0012.png` (door mid-slide).
+- README: A.14.1 row added to status table (✅). Quick-start build/launch commands updated to A.141 binaries; run command now includes `-rompath .` explicitly.
+
+### Next-step candidates for Session 11
+
+1. **A.15 — HUD / status bar**. BJ face + ammo + score + key icons in a chrome strip below the viewport. Reuses A.5 sprite blits + a tiny 4×6 number font. First time the screen looks like a *game* with chrome around the play area. ~1 h.
+2. **A.16 — Dynamic enemies**. Standing guards (obj 108..115) and patrol guards (116..127). Reuses A.14's `Object[]` + `DrawSpriteWorld` infrastructure with frame animation per state (idle/walk/hit/death) and a simple AI ticker. ~2-3 h, may want to split A.16a (rendering static enemies) + A.16b (AI movement).
+3. **A.13.1 — Raycaster polish**. Grid-line DDA proper (replace step-by-fraction; sub-pixel-exact texture coords; cheaper). Light-by-distance Wolf3D palette ramp. ~45-60 min. Worth pulling forward if perf becomes an interaction blocker before A.16.
+4. **A.10.1 reopen**. IMF stacchi — start from hypothesis E (other music chunks).
+
+S10 wrap recommendation: A.15 next. With doors closing the only visible regression and walls/sprites/doors all painted correctly, the next visible delta is chrome — and HUD finally lifts the screen out of "tech demo" framing into "game" framing without needing to wait for the AI work in A.16. Perf sweep sequencing also cleaner: A.15 adds a fixed-cost overlay (HUD pixels are a constant blit), so it does not alter the cast workload that perf would target.
+
+### S10 wrap-up
+
+Single milestone, single sitting, zero-iteration recovery (first-attempt build + first-attempt MAME launch on door logic; one fix iteration on the launch *command* — missing `-rompath` — which is independent of the milestone code). The cosmetic regression from A.14 is closed: doors render with their proper Wolf3D texture, animate open and closed in 1.6 s, and gate movement only when sufficiently open. Foundation chain A.1..A.14 paid off again — the door subsystem is ~130 LOC across one new BSS block, one helper, one CastRay branch, one DrawWallStripCol special-case, one WM_TIMER call, and one input rebind. No structural change to the cast, the renderer, or the asset pipeline.
+
+The "raycaster gentle" rule's prediction extends one more milestone: with A.13's cast in place, every visual addition since (A.14 sprites, A.14.1 doors) has been a localized data-source swap or a single-loop branch over the existing column-walk renderer. The renderer architecture is holding.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit.
+
+---

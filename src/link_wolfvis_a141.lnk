@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA141.EXE
+FILE          ..\build\wolfvis_a141.obj
+OPTION        MAP=..\build\WOLFA141.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.14.1 doors (state machine + render slab + PRIMARY toggle)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
