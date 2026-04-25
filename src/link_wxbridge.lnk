@@ -1,0 +1,8 @@
+SYSTEM        windows
+NAME          ..\build\WXBRIDGE.EXE
+FILE          ..\build\wxbridge.obj
+OPTION        MAP=..\build\WXBRIDGE.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'VIS WinExec DOS bridge test'
+OPTION        STACK=4096
+OPTION        HEAPSIZE=1024

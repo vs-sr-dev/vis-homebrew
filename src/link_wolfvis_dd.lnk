@@ -1,0 +1,11 @@
+SYSTEM        windows
+NAME          ..\build\WOLFVDD.EXE
+FILE          ..\build\wolfvis_dd.obj
+OPTION        MAP=..\build\WOLFVDD.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS DISPDIB experiment A.3'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096
+EXPORT        WolfVisWndProc
+IMPORT        DisplayDib    DISPDIB.DISPLAYDIB
+IMPORT        DisplayDibEx  DISPDIB.DISPLAYDIBEX

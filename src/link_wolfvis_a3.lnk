@@ -1,0 +1,8 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA3.EXE
+FILE          ..\build\wolfvis_a3.obj
+OPTION        MAP=..\build\WOLFA3.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.3 Wolf3D palette integration'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096

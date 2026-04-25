@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA8.EXE
+FILE          ..\build\wolfvis_a8.obj
+OPTION        MAP=..\build\WOLFA8.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.8 OPL3 smoke test'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

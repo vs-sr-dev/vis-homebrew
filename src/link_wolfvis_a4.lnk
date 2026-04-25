@@ -1,0 +1,8 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA4.EXE
+FILE          ..\build\wolfvis_a4.obj
+OPTION        MAP=..\build\WOLFA4.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.4 VSWAP loader test'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192

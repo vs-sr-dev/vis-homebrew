@@ -1,0 +1,8 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA5.EXE
+FILE          ..\build\wolfvis_a5.obj
+OPTION        MAP=..\build\WOLFA5.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.5 VSWAP sprite loader'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192

@@ -1,0 +1,8 @@
+SYSTEM        windows
+NAME          ..\build\HELLO.EXE
+FILE          ..\build\hello.obj
+OPTION        MAP=..\build\HELLO.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'Hello VIS Modular Windows sample'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096

@@ -1,0 +1,6 @@
+SYSTEM        dos
+NAME          ..\build\DOSH.EXE
+FILE          ..\build\dosh.obj
+OPTION        MAP=..\build\DOSH.MAP
+OPTION        QUIET
+OPTION        STACK=4096

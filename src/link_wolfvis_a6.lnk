@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA6.EXE
+FILE          ..\build\wolfvis_a6.obj
+OPTION        MAP=..\build\WOLFA6.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.6 hand controller input'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

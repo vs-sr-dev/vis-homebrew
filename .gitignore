@@ -1,0 +1,42 @@
+# Toolchain (script-fetchable, ~537 MB)
+tools/
+
+# Copyright Tandy/Memorex — retail discs, BIOS, and validation file
+isos/
+vis.zip
+reverse/*.bin
+reverse/extracted/
+reverse/CONTROL.TAT*
+reverse/*.tat
+reverse/*.iso
+reverse/*.exe
+
+# Copyright Microsoft — Modular Windows SDK
+docs/
+
+# Copyright Apogee/id Software — Wolf3D shareware assets and source clone
+assets/
+wolf3d/
+
+# Build artifacts and CD staging
+build/
+cd_root/
+cd_root_*/
+
+# MAME runtime state
+cfg/
+cfg_backup_*/
+nvram/
+
+# Build leftovers in src/ (Watcom intermediate)
+*.obj
+*.exe
+*.com
+
+# Python
+*.pyc
+__pycache__/
+
+# OS
+.DS_Store
+Thumbs.db

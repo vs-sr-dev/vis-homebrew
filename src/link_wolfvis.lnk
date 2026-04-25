@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFVIS.EXE
+FILE          ..\build\wolfvis.obj
+OPTION        MAP=..\build\WOLFVIS.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS - milestone A.1 GDI blit'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096
+EXPORT        WolfVisWndProc
