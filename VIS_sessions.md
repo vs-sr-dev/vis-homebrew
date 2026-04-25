@@ -543,14 +543,58 @@ Fix: revert to full-source `StretchDIBits(hdc, 0, 0, SCR_W, SCR_H, 0, 0, SCR_W, 
 
 **Result:** smoke-tested in MAME 0.287 vis. User report: "molto più fluido, anni luce rispetto a prima"; after the StretchDIBits fix: "assolutamente perfetto ora, nessuna scia residua e audio confermato tutto ok". OPL3 audio and heartbeat indicator unchanged.
 
+### Part 3 — Milestone A.10 (IMF music playback)
+
+**Goal:** Wolfenstein 3D AdLib music audible on Tandy/Memorex VIS hardware. AUDIOT.WL1 + AUDIOHED.WL1 loader + IMF event scheduler driving OPL3 register writes.
+
+**Recon:**
+- AUDIOWL1.H declares NUMSNDCHUNKS = 234 (= 3 * 69 SFX + 27 music) with `STARTMUSIC = 207`. The shareware AUDIOHED.WL1 we have is 1156 B = 289 DWORDs (288 chunks) — the SDK constants don't match this re-pack.
+- Actual music chunks empirically live at indices 260..287, with each track represented by a small 88-byte placeholder + the real data block. Chunk 261 (7546 B) = first big music chunk = CORNER_MUS ("Enemy Around the Corner"), confirmed by user listening. Chunks 263, 264, 268, 270, 272, 273, 275, 277, 284, 285 are also non-trivial music data.
+- MusicGroup format: `WORD length` + `WORD values[length/2]` IMF stream + ~88 B trailing MUSE metadata (ignored by player). Each IMF event = 2 WORDs: `(reg+val packed)` low=reg high=val, then `delay` in 700 Hz ticks.
+- Tick rate confirmed 700 Hz from `SDL_SetTimerSpeed` in ID_SD.C: `rate = TickBase * 10 = 70 * 10 = 700`. Cross-checked: at 700 Hz, total tick sum 42893 → track length 61 sec, matches YouTube reference for CORNER_MUS.
+
+**Implementation (`wolfvis_a10.c`):**
+- `audio_offsets[289]` and `music_buf[24000]` declared `__far` (forces them out of DGROUP — without it the linker errors with "default data segment exceeds maximum size by 7891 bytes").
+- `LoadAudioHeader()` reads AUDIOHED.WL1 in one shot (1156 B). `LoadMusicChunk(idx)` seeks AUDIOT.WL1 to `audio_offsets[idx]`, reads the chunk into `music_buf`.
+- `StartMusic()` parses the WORD length prefix, sets up `sqHack`/`sqHackPtr`/`sqHackLen`/`sqHackSeqLen`, resets `alTimeCount = 0` and OPL3 registers.
+- `ServiceMusic()` is the port of SDL_ALService: GetTickCount delta → ticks_advance via `elapsed_ms * 700 / 1000` → drains all events whose `sqHackTime <= alTimeCount` via `OplOut(reg, val)` + `sqHackTime += delay`.
+
+**Three iterative bugs (now memorized as `reference_imf_scheduler_gotchas.md`):**
+
+1. **First build — slow tempo (~50%).** I had `sqHackTime = alTimeCount + delay` in the inner loop, copied verbatim from the original SDL_ALService. The original increments `alTimeCount` by 1 per ISR call (at 700 Hz), so `alTimeCount` is always "the current tick exactly". With *batched* advance (`alTimeCount += 38` per WM_TIMER call), `alTimeCount` jumps, and `alTimeCount + delay` pushes every queued event to the *end* of the current batch instead of to its true virtual due time. Each in-flight event accumulates a +38-tick drift. **Fix**: `sqHackTime += delay` — accumulate cumulative virtual time independent of when alTimeCount catches up.
+
+2. **Second build — per-beat drag.** Tempo correct on average, but the music sounded jerky, "struggling at every new beat". Cause: I was driving `ServiceMusic()` from `WM_TIMER`, which on Win16 has ~55 ms minimum granularity. IMF events arrive at ~1.43 ms cadence (700 Hz), so a single WM_TIMER tick processed all events within a ~38-tick burst, then went silent for the rest of the 55 ms. Audible as a "lurch" every beat. **Fix**: moved the scheduler to a `PeekMessage` idle loop in WinMain — `ServiceMusic()` is now called thousands of times per second between message dispatches, dispatch granularity drops to ~1 ms, residual frame-skip is ~1-2% (within PoC tolerance).
+
+3. **DGROUP overflow (link-time).** Adding `music_buf[24000]` + `audio_offsets[1156 B]` on top of the existing carmack/RLEW buffers + map planes overflowed Watcom's default data segment by 7891 B. Watcom auto-segments arrays >= ~32 KB into their own segment (so `framebuf[64000]` and `static_bg[64000]` were already isolated), but smaller arrays go into DGROUP. **Fix**: `static DWORD __far audio_offsets[...]` + `static BYTE __far music_buf[...]` forces explicit far-segment placement.
+
+**Final architecture:**
+- `WM_TIMER` reverted to 500 ms — used only for heartbeat / debug-bar refresh, no longer for music.
+- WinMain message loop:
+  ```c
+  for (;;) {
+      if (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+          if (msg.message == WM_QUIT) return msg.wParam;
+          TranslateMessage(&msg); DispatchMessage(&msg);
+      } else if (sqActive) ServiceMusic();
+      else WaitMessage();
+  }
+  ```
+- `WaitMessage()` when music is off avoids a 100 % busy-loop. When music is on, the loop spins as fast as the CPU permits.
+
+**Controls:** Y (`VK_HC1_F3`) starts music, X (`VK_HC1_F4`) stops it. `gAudioOn` cyan indicator in the debug bar reflects play state. The pre-existing single-A4-note path on `VK_HC1_F1` is preserved.
+
+**Result:** user report after fix #3 — "ora è sostanzialmente quasi a 1:1, si perde ogni tanto magari un frame (si nota uno 'stacco') ma è fixabile in seguito. Come PoC è perfetto." The Wolf3D theme "Enemy Around the Corner" plays recognizably on emulated VIS hardware — first time Wolfenstein 3D music has been heard on a Tandy/Memorex platform. Cursor responsiveness during playback unaffected (PeekMessage drains the queue ahead of the music idle).
+
 ### Concrete results (S5)
 
 - New: `src/wolfvis_a9.c` (~575 LOC), `src/link_wolfvis_a9.lnk`, `src/build_wolfvis_a9.bat`, `src/mkiso_a9.py`.
 - New: `cd_root_a9/` staging (uses A.8 file set + WOLFA9.EXE + patched SYSTEM.INI shell line). `build/wolfvis_a9.iso` (216 KB), `build/WOLFA9.EXE` (135 KB; +64 KB vs A.8 because of `static_bg`).
-- New: `LICENSE` (MIT, 2026 Samuele Voltan). `README.md`. `.gitignore`.
+- New: `src/wolfvis_a10.c` (~720 LOC), `src/link_wolfvis_a10.lnk`, `src/build_wolfvis_a10.bat`, `src/mkiso_a10.py`.
+- New: `cd_root_a10/` (A.9 file set + AUDIOHED.WL1 + AUDIOT.WL1 + WOLFA10.EXE). `build/wolfvis_a10.iso` (374 KB), `build/WOLFA10.EXE` (161 KB).
+- New: `LICENSE` (MIT, 2026 Samuele Voltan). `README.md` (with milestone status table kept in sync per commit). `.gitignore`.
 - Translated and scrubbed `VIS_sessions.md` (this file).
-- Public GitHub repo `vs-sr-dev/vis-homebrew` with 3 commits: `7a7f07d` (initial), `90555f6` (LICENSE), `4a0199c` (A.9 perf refactor).
-- Memory: `feedback_repo_files_english`, `feedback_session_log_granular` (rule update for per-commit log update), `user_licensing_philosophy`, `reference_mame_path`, `reference_stretchdibits_partial_src_gotcha`, `project_milestone_A9_perf`. Updated `MEMORY.md` index.
+- Public GitHub repo `vs-sr-dev/vis-homebrew` with 5 commits at session close: `7a7f07d` (initial), `90555f6` (LICENSE), `4a0199c` (A.9 code), `4c6fbac` (S5 docs catch-up for A.9 — workflow reformed afterward), `b73acc8` (README status sync for A.9 → A.10), then a single combined commit for A.10 code + sessions log + README.
+- Memory: `feedback_repo_files_english`, `feedback_session_log_granular` (rule update for per-commit log + README update), `user_licensing_philosophy`, `reference_mame_path`, `reference_stretchdibits_partial_src_gotcha`, `project_milestone_A9_perf`, `project_milestone_A10_imf`, `reference_imf_scheduler_gotchas`. Updated `MEMORY.md` index.
 
 ### Trap / Gotcha / Eureka (S5)
 
@@ -563,21 +607,30 @@ Fix: revert to full-source `StretchDIBits(hdc, 0, 0, SCR_W, SCR_H, 0, 0, SCR_W, 
 - **Eureka S5.E1 — Watcom large-model handles a second 64 KB buffer transparently:** `static BYTE static_bg[64000]` next to the existing `framebuf[64000]` compiled and ran without any `__far` / `__huge` annotation, no segment-overflow warning, no runtime issue. Watcom puts each 64 KB array in its own data segment automatically.
 - **Eureka S5.E2 — GDI clipping makes "full-source partial-dest blit" effectively as fast as a true partial blit on small dirty regions:** the readout of 64 KB src is dwarfed by the savings from not having to recompute the framebuf. Combined with `DIB_PAL_COLORS` (zero per-pixel color match), the practical perf is dominated by the size of `InvalidateRect`'s rect, not by the StretchDIBits source size.
 - **Eureka S5.E3 — VIS_sessions.md scrub before publication is non-trivial:** even a careful initial pass missed 3 absolute-path leaks in prose lines. The git remote being public makes every paragraph a potential leak surface, not just code.
+- **Gotcha S5.7 — IMF batched scheduler `sqHackTime = alTimeCount + delay`:** verbatim port from SDL_ALService produces the wrong tempo when `alTimeCount` advances in batches instead of by 1 per ISR. Cumulative `sqHackTime += delay` is the canonical fix. See `reference_imf_scheduler_gotchas`.
+- **Gotcha S5.8 — WM_TIMER too coarse for IMF dispatch:** Win16 timer minimum ~55 ms vs IMF tick 1.43 ms. Driving `ServiceMusic` from WM_TIMER produces audible per-beat drag. Move scheduler to a `PeekMessage` idle loop with `WaitMessage()` fallback when music inactive.
+- **Gotcha S5.9 — DGROUP overflow with audio buffers:** `music_buf[24000]` + `audio_offsets[1156 B]` overflowed Watcom's default data segment by 7891 B. `__far` keyword on the array declarations forces explicit far-segment placement.
+- **Eureka S5.E4 — `AUDIOHED.WL1` shareware re-pack ≠ `AUDIOWL1.H` constants:** the SDK header has `NUMSNDCHUNKS = 234` and `STARTMUSIC = 207`, but our actual `AUDIOHED.WL1` is 1156 B = 289 DWORDs (288 chunks) with music at indices 260..287. Don't trust the SDK constants — count the file. Music chunks are paired with 88-byte placeholders (likely empty MUSE slot headers), so identify "real" tracks by length > 1 KB.
+- **Eureka S5.E5 — `__far` keyword still useful in Watcom -ml:** even though `-ml` (large memory model) defaults pointers to far, static array placement is heuristic — small arrays go in DGROUP, big ones (>= ~32 KB) get their own segment. Explicit `__far` overrides the heuristic.
+- **Eureka S5.E6 — `PeekMessage` + `WaitMessage` idle loop is the canonical pattern for sub-WM_TIMER scheduling on Win16.** Holds for music, animations, polling external IO. No need to involve MMSYSTEM unless ms-precise scheduling is required.
 
 ### Next-step candidates for Session 6
 
-After A.9, the **S4 list still applies** but A.9 has changed the picture: the foundation is now performant enough to support animations, audio polling, and eventually the raycaster.
+A.9 + A.10 closed in S5. Foundation is now performant enough AND can play music; remaining items toward Wolf3D PoC:
 
-1. **A.10 — AUDIOT.WL1 parser + IMF playback.** Headline emotional milestone: Wolfenstein 3D theme playing on Tandy/Memorex VIS hardware. Format: AUDIOHED.WL1 = chunk offsets/lengths, AUDIOT.WL1 = packed chunks with the music tracks at the end (after PC-speaker SFX, AdLib SFX, digitized SFX). IMF stream = `WORD prefix_length` then `(reg, val, delay_word)` triples at 700 Hz tick rate. Scheduling tradeoff: WM_TIMER + accumulator drift (good enough for smoke) vs `timeSetEvent` from MMSYSTEM (ms-precise but needs MMSYSTEM linkage).
-2. **A.11 — Unified integrated scene.** Walls + sprites + minimap + cursor + click-sounds together. Demonstrative consolidation pre-raycaster: all the A.3..A.8 + A.9 primitives composited into one scene. No new tech, just careful integration.
-3. **A.12 — Scaler port.** Port `WL_SCALE` / `OLDSCALE.C` simple-path so `DrawSprite` can render at variable size. Final step before the raycaster, since the raycaster relies on per-column scaled wall slices.
+1. **A.10.1 — IMF frame-skip polish (optional).** User reports occasional audible "stacco" during playback, likely 1-2 % drift accumulated by integer rounding in `(elapsed_ms * 700) / 1000`. Two possible fixes: (a) maintain a fractional remainder accumulator (`ticks_remainder` in tick-thousandths); (b) switch to MMSYSTEM `timeSetEvent` for ms-precise scheduling. Not blocking — fixable when convenient.
+2. **A.11 — Unified integrated scene.** Walls + sprites + minimap + cursor + click-sounds + music together in one demo scene. All A.3..A.8 + A.9 + A.10 primitives composited. No new tech, careful integration.
+3. **A.12 — Scaler port.** Port `WL_SCALE` / `OLDSCALE.C` simple-path so `DrawSprite` can render at variable size. Final tooling before the raycaster.
 4. **A.13 — Raycaster.** Last (per the "be gentle with the raycaster" rule). Map grid in memory (plane0), palette + textures + sprites + framebuf + input + audio all present and proven.
 5. **`hcControl HC_SET_KEYMAP`** — remap VK_HC1_* slots back to standard VK codes for ergonomic switch-cases. Cosmetic, not critical.
+6. **Asset audit utility.** Small Python script to list AUDIOHED chunk lengths + music name guesses (matching paired chunk indices to AUDIOWL1.H enum order). Useful for picking different music tracks than the chunk-261 default.
 
-S6 recommendation: (1) IMF music — concise scope, big perceived "Wolf3D on VIS" moment; if scheduler accuracy is a problem, fall back to MMSYSTEM and mark as a sub-milestone.
+S6 recommendation: (2) integrated scene — consolidates everything we have, sets the stage cleanly for the raycaster. The IMF frame-skip polish (1) is worth a quick stab if the user notices it during the integrated demo.
 
 ### S5 wrap-up
 
-Two distinct deliverables in one session: (a) project went from local-only to public open-source on GitHub with proper licensing, copyright hygiene, and English documentation; (b) A.9 perf foundation closes a real input-lag problem and unlocks animations / scheduler work. The A.9 partial-blit detour cost ~15 minutes but produced a memory-recorded gotcha that will save time on every future Win16 VIS app touching `StretchDIBits`. Pacing was uneven (Part 1 took longer than expected because of the multi-pass copyright scrub), but no scope was deferred. Workflow rule "VIS_sessions.md updated before each commit" established for going forward — adopted starting with the next milestone (A.10).
+Three distinct deliverables in one session: (a) project went from local-only to public open-source on GitHub with proper licensing, copyright hygiene, and English documentation; (b) A.9 perf foundation closes a real input-lag problem and unlocks animations / scheduler work; (c) A.10 IMF playback PoC — Wolfenstein 3D music audible on Tandy/Memorex VIS for the first time, with three iteratively-debugged scheduler bugs producing two new gotcha memories. Pacing was uneven (Part 1 took longer than expected because of the multi-pass copyright scrub), but no scope was deferred. Workflow rule established mid-session: `VIS_sessions.md` + `README.md` status table both updated as part of every milestone commit, not in catch-up commits afterward — adopted starting with A.10.
+
+S5 produced two big foundation pieces (perf + audio) plus a publishable repo. Wolf3D PoC remaining work narrows to: integrated scene composition, sprite scaler, and raycaster. With audio + input + minimap + sprites + walls + music all proven, the raycaster is the only major unknown left.
 
 ---

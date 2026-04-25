@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA10.EXE
+FILE          ..\build\wolfvis_a10.obj
+OPTION        MAP=..\build\WOLFA10.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.10 IMF music playback (AUDIOT.WL1 + OPL3)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

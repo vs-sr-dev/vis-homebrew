@@ -20,8 +20,8 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.7 — GAMEMAPS | MAPHEAD/Carmack/RLEW decompressors + minimap E1L1 | ✅ |
 | A.8 — OPL3 | Direct port I/O 0x388/0x389 + sustained A4 note | ✅ |
 | A.9 — Perf refactor | Static-bg snapshot + cursor erase/redraw + dirty-rect | ✅ |
-| A.10 — IMF music | AUDIOT.WL1 / AUDIOHED.WL1 parser + IMF event scheduler over OPL3 | 🚧 next |
-| A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited | ⏳ |
+| A.10 — IMF music | AUDIOT.WL1 / AUDIOHED.WL1 parser + IMF event scheduler over OPL3 (PoC) | ✅ |
+| A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited | 🚧 next |
 | A.12 — Sprite scaler | WL_SCALE simple-path port for variable-size DrawSprite | ⏳ |
 | Raycaster | WL_DRAW port over the existing foundation | ⏳ |
 
