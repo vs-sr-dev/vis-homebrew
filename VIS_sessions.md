@@ -634,3 +634,109 @@ Three distinct deliverables in one session: (a) project went from local-only to 
 S5 produced two big foundation pieces (perf + audio) plus a publishable repo. Wolf3D PoC remaining work narrows to: integrated scene composition, sprite scaler, and raycaster. With audio + input + minimap + sprites + walls + music all proven, the raycaster is the only major unknown left.
 
 ---
+
+## Session 6 — 2026-04-25 — Milestone A.11 (integrated demo scene)
+
+**Scope:** consolidate every primitive proven in A.1..A.10 into a single composited scene before any new tech (scaler/raycaster). The `project_S6_todo_opening` memo recommended this as the global compatibility check between perf foundation, asset loaders, audio scheduler, and HC input. User confirmed at session open. No new subsystem; the value is provability that the existing primitives coexist cleanly.
+
+### Layout (320×200)
+
+| Region | Content | Source |
+|---|---|---|
+| y=0..29 | Debug bar (heartbeat, focus, map/vswap status, audio LED, msg/key counters, bit grids) | A.6/A.9 |
+| y=35..98, x=0..255 | 4 wall textures from VSWAP (chunks 0..3) | A.4 |
+| y=35..98, x=256..319 | E1L1 minimap compressed at TILE_PX=1 (64×64) | A.7 |
+| y=99..104 | Black gutter (visual separator) | new in A.11 |
+| y=105..168 | 3 sprite gallery (Demo / DeathCam / STAT_0) at x=15, 125, 235 | A.5 |
+| y=169..199 | Free band, cursor allowed | — |
+
+Cursor is clamped to `x∈[5,314], y∈[35,194]` so it can move over walls, sprites, minimap, or the bottom band — but never enters the debug bar (which is repainted every 500 ms on WM_TIMER and would clobber cursor pixels).
+
+### Implementation
+
+`src/wolfvis_a11.c` (~720 LOC) is a clone of `wolfvis_a10.c` with:
+
+- **VSWAP loader** ported from `wolfvis_a5.c` (`LoadVSwap`, `DrawWallStrip`, `DrawSprite`). Now sized for `WALL_COUNT=4` (4×64 = 256 wide, leaves a clean 64-wide column for the minimap on the right). `NUM_SPRITES=3` unchanged.
+- **`DrawMinimapCompressed`** — new variant of `DrawMinimap` at `TILE_PX=1`, no border, fixed at top-right (256, 35). Combines plane0 wall color with plane1 object color in a single per-pixel pass.
+- **`SetupStaticBg`** — composites walls + minimap + sprites + gutter into framebuf, then snapshots into `static_bg[64000]`. Cursor erase via `RestoreFromBg` (A.9 pattern) now correctly restores wall/sprite/minimap pixels under the cursor.
+- **`VK_HC1_F1`** rebound to one-shot "init OPL3 + start music" (A.10 had separate F1=note and F3=start music). Idempotent — checks `!sqActive` before re-entering. Brings the whole audio stack to life with a single button press from the cold-start state.
+- **`VK_HC1_F3`** = stop music (was secondary purpose in A.10).
+- **`VK_HC1_PRIMARY` / `VK_HC1_SECONDARY`** = high/mid click tones using channel-0 OPL writes; music continues unaffected because the IMF stream uses channels 1..8.
+
+### Memory
+
+VSWAP additions: `walls[4][4096] = 16 KB`, `sprites[3][4096] = 12 KB`, `pageoffs[700] = 2.8 KB`, `pagelens[700] = 1.4 KB`. Both `walls[]` and `sprites[]` declared `__far` to keep DGROUP under 64 KB on top of A.10's existing carmack/RLEW/map planes + audio buffers. Without `__far` placement, link-time DGROUP overflow would have hit again as in A.10's S5 gotcha.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a11.obj wolfvis_a11.c` — clean, no warnings.
+- Link: `wlink @link_wolfvis_a11.lnk` — IMPORT `hcGetCursorPos HC.HCGETCURSORPOS` retained (mandatory for WM_KEYDOWN routing per A.8 gotcha).
+- Output: `build/WOLFA11.EXE` (195 KB; +34 KB vs A.10 for `walls[] + sprites[] + pageoffs[] + pagelens[]`).
+- ISO: `build/wolfvis_a11.iso` (1.16 MB). `cd_root_a11/` carries A.10 file set + `VSWAP.WL1` (742 KB shareware) + new `WOLFA11.EXE` and `SYSTEM.INI` with `shell=a:\WOLFA11.EXE`.
+
+### Result
+
+First-attempt success in MAME 0.287 vis. Snapshot captured in `src/snap/vis/0001.png` (note: MAME writes snapshots to `<cwd>/snap/`, which depends on where MAME is launched from — not the rompath). Visible:
+
+- Debug bar with bit grids and heartbeat block alternating.
+- 4 wall textures at top-left (Wolf3D first-bank wall art: stone, brick, wood-like).
+- Minimap top-right showing E1L1's room layout with cyan dots for guards, green markers for items, "T" shape (the elevator).
+- "Demo" sprite (red text bitmap, BJ shareware-version splash) and "DeathCam" sprite (yellow text) in the middle band. STAT_0 visible as a small cyan blip in the right gallery slot — STAT_0 is a small floor-prop sprite, just a few columns wide at the bottom of its 64×64 bbox.
+- Cursor moves smoothly over the entire scene under d-pad input. Erase-and-redraw via static_bg restores walls/sprites/minimap pixels correctly under the cursor's previous position.
+- F1 starts CORNER_MUS playback. PRIMARY and SECONDARY trigger short OPL clicks without disrupting the music stream (channel-0 vs channels-1..8 separation).
+
+User confirmation: "Tutto confermato! Tutto funzionante!"
+
+### IMF "swallowed note" diagnosis (carryover A.10 issue)
+
+User reports the same "stacco" observed at the end of S5 — but characterizes it more precisely now: occasionally a note is *eaten* and the next phrase starts early, as if a 4/4 bar shortened to 7/8. Not constant, not periodic.
+
+Diagnosis: this is *not* the integer-rounding drift originally hypothesized in `project_S6_todo_opening` (that would slow the tempo, not skip notes). The actual mechanism is **burst-processing after a paint stall**:
+
+1. Every 500 ms the WM_TIMER fires `DrawDebugBar` + `InvalidateRect(top 30 rows)`.
+2. The next WM_PAINT runs `StretchDIBits(... 320×200 ...)`. Even with `DIB_PAL_COLORS` (no per-pixel color match), a 64 KB blit on emulated 80286 at 12 MHz takes 20-50 ms.
+3. During that paint, neither PeekMessage nor `ServiceMusic` runs. `GetTickCount` keeps advancing.
+4. When PeekMessage returns control to the idle path, `elapsed_ms` is 20-50 ms → `ticks_advance = 14-35` → the while loop drains 20-30 IMF events back-to-back without time for OPL envelopes to play out between coupled key-on/key-off pairs.
+5. Audible effect: a phrase of stacked notes loses its inter-note attack/release dynamics and the perceived rhythm "compresses" by one beat.
+
+The cumulative *average* tempo is still correct (because `sqHackTime += delay` accumulates virtual time independently of when alTimeCount catches up — the S5 fix). But intra-burst microtiming is collapsed.
+
+Fix candidates for A.10.1 (deferred — not blocking PoC):
+- **(a) Cap events per call.** Limit the while loop to e.g. 4 events per `ServiceMusic`, then return. Idle-loop spins fast enough that the next ServiceMusic call happens within 1-2 ms and processes the next batch with proper inter-event spacing.
+- **(b) Service music between dispatched messages too.** Currently ServiceMusic only runs when PeekMessage returns FALSE. Adding `if (sqActive) ServiceMusic();` after each DispatchMessage gives an extra slot during message bursts.
+- **(c) Multimedia timer (`timeSetEvent`).** Higher-resolution callback independent of the message loop. More invasive (link-script change, callback function in fixed code segment) but architecturally cleaner.
+
+### Concrete results
+
+- New: `src/wolfvis_a11.c` (~720 LOC), `src/link_wolfvis_a11.lnk`, `src/build_wolfvis_a11.bat`, `src/mkiso_a11.py`.
+- New: `cd_root_a11/` (8 files: AUTOEXEC, CONTROL.TAT, SYSTEM.INI, MAPHEAD/GAMEMAPS/AUDIOHED/AUDIOT/VSWAP .WL1, WOLFA11.EXE).
+- New: `build/WOLFA11.EXE` (195 KB), `build/wolfvis_a11.iso` (1.16 MB).
+- New: `src/snap/vis/0001.png` (PoC screenshot).
+- README status table: A.11 ✅, A.12 marked 🚧 next. Quick-start build/launch commands updated to reference A.11 binaries.
+
+### Trap / Gotcha / Eureka (S6)
+
+- **Gotcha S6.1 — MAME snapshot directory follows MAME's cwd, not `-rompath`.** F12 in MAME writes to `<cwd>/snap/<driver>/NNNN.png` where `<cwd>` is the directory MAME was launched from. We launched MAME from `/d/Homebrew4/VIS/src` (residual cwd from a previous bash command), so the A.11 snap landed in `src/snap/vis/0001.png` instead of the expected `snap/vis/`. Not a bug — just MAME default behavior. To pin it, pass `-snapshot_directory <abspath>` or always launch MAME from the project root.
+- **Eureka S6.E1 — `__far` BSS placement scales linearly to multiple large arrays.** A.10 needed `__far` on `music_buf[24000]`. A.11 added `walls[16 KB]` + `sprites[12 KB]` + `pageoffs[2.8 KB]` + `pagelens[1.4 KB]`. All marked `__far` (or auto-segmented for the 16 KB walls), and Watcom's large-model linker placed each in its own data segment without complaint. DGROUP usage stayed flat at the A.10 level; no new overflow despite +34 KB of asset BSS.
+- **Eureka S6.E2 — IMF "swallowed note" is not drift, it's burst-processing.** Originally hypothesized as integer-rounding drift in `(elapsed_ms * 700) / 1000`. The user's musical characterization (4/4 → 7/8, missing beat) localized it to a *temporal compression* during a single ServiceMusic call after WM_PAINT held the message loop. Average tempo still correct. Fix is local (cap events per call), not architectural (no need for multimedia timer).
+- **Eureka S6.E3 — Channel separation lets click SFX coexist with IMF music.** OPL channel 0 is unused by Wolf3D's IMF stream (which targets channels 1..8 and rhythm). Writing OPL note-on to channel 0 from WM_KEYDOWN does not interfere with running music. Useful for future click-feedback / sound effects without needing a full SFX scheduler.
+
+### Next-step candidates for Session 7
+
+1. **A.10.1 — IMF burst polish.** Add per-call event cap (4-8 events) + ServiceMusic between dispatched messages. Should eliminate the audible "swallowed note" without architectural changes. ~30 min.
+2. **A.12 — Sprite scaler.** Port `SimpleScaleShape` from `WOLFSRC/OLDSCALE.C`. Fixed-point math (no WOLFHACK assembly path). One sprite cycles size with a button. Last tooling step before the raycaster. ~1-1.5 h.
+3. **A.13 — Raycaster.** Per the "raycaster gentle" rule, this comes only after A.12. All foundation present and proven (palette, walls, sprites, framebuf, input, audio, perf, integrated scene). WL_DRAW port over the existing primitives.
+4. **`hcControl HC_SET_KEYMAP`** — remap VK_HC1_* slots to standard VK codes. Cosmetic ergonomics.
+5. **Asset audit utility.** Python script to map AUDIOHED chunk indices → Wolf3D track names (CORNER_MUS, NAZI_NOR, etc.) for music selection.
+
+S6 wrap recommendation: start S7 with (1) A.10.1 polish (~30 min warm-up that eliminates a known audible defect), then attack (2) A.12 scaler — the last subsystem before the raycaster.
+
+### S6 wrap-up
+
+Single milestone, single sitting, first-attempt build success, first-attempt MAME run validated by user. The "no new tech, careful integration" prediction held — every primitive (walls, sprites, minimap, cursor, music, click tones, perf erase/redraw) coexists in one frame without subsystem conflicts. The compatibility check the memo identified as the *purpose* of A.11 returned green: PeekMessage idle + dirty-rect blit + audio scheduler + HC input all interoperate cleanly.
+
+The only finding to carry forward is the IMF burst-processing diagnosis, which redirects the A.10.1 polish path away from "drift accumulator" (the S5 hypothesis) toward "cap events per call" (the S6 hypothesis based on user's musical-rhythm characterization). That's a smaller, more targeted fix than what was queued.
+
+With A.11 closed, the foundation is complete: the sprite scaler (A.12) and the raycaster (A.13) are the only two remaining unknowns to a playable Wolfenstein 3D PoC on Tandy/Memorex VIS.
+
+---

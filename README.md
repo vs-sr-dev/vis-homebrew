@@ -21,8 +21,8 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.8 — OPL3 | Direct port I/O 0x388/0x389 + sustained A4 note | ✅ |
 | A.9 — Perf refactor | Static-bg snapshot + cursor erase/redraw + dirty-rect | ✅ |
 | A.10 — IMF music | AUDIOT.WL1 / AUDIOHED.WL1 parser + IMF event scheduler over OPL3 (PoC) | ✅ |
-| A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited | 🚧 next |
-| A.12 — Sprite scaler | WL_SCALE simple-path port for variable-size DrawSprite | ⏳ |
+| A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited in one frame | ✅ |
+| A.12 — Sprite scaler | WL_SCALE simple-path port for variable-size DrawSprite | 🚧 next |
 | Raycaster | WL_DRAW port over the existing foundation | ⏳ |
 
 ## Repository layout
@@ -58,14 +58,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a8.bat"     # produces build/WOLFA8.EXE
-python mkiso_a8.py                  # produces build/wolfvis_a8.iso
+cmd /c ".\build_wolfvis_a11.bat"    # produces build/WOLFA11.EXE
+python mkiso_a11.py                 # produces build/wolfvis_a11.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a8.iso -window -nomax -skip_gameinfo
+mame -rompath . vis -cdrom build/wolfvis_a11.iso -window -nomax -skip_gameinfo
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

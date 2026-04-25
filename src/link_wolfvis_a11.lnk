@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA11.EXE
+FILE          ..\build\wolfvis_a11.obj
+OPTION        MAP=..\build\WOLFA11.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.11 integrated demo scene (walls + minimap + sprites + cursor + music)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

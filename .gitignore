@@ -27,6 +27,8 @@ cd_root_*/
 cfg/
 cfg_backup_*/
 nvram/
+snap/
+src/snap/
 
 # Build leftovers in src/ (Watcom intermediate)
 *.obj
