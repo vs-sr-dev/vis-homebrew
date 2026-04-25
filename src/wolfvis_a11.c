@@ -1,5 +1,22 @@
 /*
- * WolfVIS A.11 — Integrated demo scene.
+ * WolfVIS A.11 + A.10.1 polish — Integrated demo scene with IMF burst fix.
+ *
+ * A.10.1 polish (S6 follow-up):
+ *   - ServiceMusic caps at 4 events per call, returns early. Spreads big
+ *     post-WM_PAINT bursts across multiple idle iterations so OPL envelopes
+ *     have time to play between coupled key-on/key-off pairs.
+ *   - Dropped the `ticks_advance == 0` early-return: backlog events with
+ *     `sqHackTime <= alTimeCount` from a prior bump must keep draining
+ *     even on calls where elapsed_ms rounds to 0.
+ *   - WinMain now also calls ServiceMusic after each DispatchMessage,
+ *     not just from the idle branch, so message bursts (HC input flood,
+ *     palette messages) don't starve the audio scheduler.
+ *   Diagnosis: user described the artifact as "nota mangiata, prossima
+ *   parte prima — 4/4 → 7/8". Average tempo was correct (cumulative
+ *   sqHackTime), but burst-drain after a 20-50ms paint stall collapsed
+ *   intra-burst microtiming. Fix is local, not architectural.
+ *
+ * --- A.11 baseline reference ---
  *
  * First milestone where every Wolf3D PoC primitive proven in A.1..A.10
  * runs together in one composited frame:
@@ -36,6 +53,14 @@
 #include "gamepal.h"
 
 extern void FAR PASCAL hcGetCursorPos(LPPOINT lpp);
+
+/* MMSYSTEM finer-timer attempt (timeGetTime + timeBeginPeriod) was tried
+ * and reverted: on Modular Windows VIS, timeGetTime returns a counter that
+ * advances at ~half the wall-clock rate (probably a different timer source
+ * than GetTickCount, miscalibrated in this firmware). Net effect: music
+ * playback at 50 % speed. Sticking with GetTickCount (55 ms PIT-quantized
+ * but at least correct on average) and accepting residual bursts as a
+ * known A.10.1 limitation. See gotcha memory `reference_mmsystem_vis_half_rate`. */
 
 #define SCR_W        320
 #define SCR_H        200
@@ -129,7 +154,27 @@ static WORD  sqHackSeqLen = 0;
 static DWORD sqHackTime = 0;
 static DWORD alTimeCount = 0;
 static BOOL  sqActive = FALSE;
-static DWORD sqLastTick = 0;
+static DWORD sqLastTick = 0;     /* unused with PIT-direct, kept for ABI */
+
+/* PIT-direct timing state. Reads PIT counter 0 (port 0x40) via latch
+ * (port 0x43, mode 0x00) for sub-ms precision without depending on
+ * GetTickCount (55 ms quantized) or MMSYSTEM timeGetTime (half-rate
+ * regression on Modular Windows VIS firmware).
+ *
+ * 1193182 PIT Hz / 700 IMF Hz = 1704.546 cycles/tick. 1704 = ~0.03 %
+ * fast (imperceptible). pit_accum carries the residual so we never
+ * drop a tick to integer truncation. Counter 0 is shared with the
+ * BIOS PIT IRQ 0 handler, which only increments BDA tick on wrap and
+ * never touches the counter, so latched reads are non-disruptive
+ * (no CLI/STI required). */
+/* Empirical: 1704 (theoretical at 1.193 MHz mode 2) gave music at ~50 %
+ * speed on MAME-VIS. 852 (~half) gives correct tempo. Suggests MAME-VIS
+ * emulates PIT at 596 kHz, OR the BIOS programs counter 0 in mode 2 with
+ * a 596 kHz input clock derived from the 14.318 MHz OSC / 24. Either way
+ * 852 visible-counter cycles = 1 IMF tick at 1:1 with wall clock. */
+#define PIT_CYCLES_PER_IMF_TICK 852U
+static WORD  prev_pit_count = 0;
+static DWORD pit_accum      = 0;
 
 /* Cursor + debug bar */
 static int   cursor_x       = 160;
@@ -197,6 +242,45 @@ static void OplNoteOff(void)
     OplOut(0xB0, 0x00);
 }
 
+/* ---- PIT-direct hi-res clock (A.10.1 polish) ---- */
+
+static WORD ReadPitCounter(void)
+{
+    BYTE lo, hi;
+    /* PIT command 0x00 = latch counter 0 for atomic 2-byte read. */
+    outp(0x43, 0x00);
+    lo = (BYTE)inp(0x40);
+    hi = (BYTE)inp(0x40);
+    return ((WORD)hi << 8) | (WORD)lo;
+}
+
+/* Read PIT, compute cycles elapsed since last call, accumulate, and
+ * advance alTimeCount by however many full IMF ticks fit in the
+ * accumulator. Residual cycles stay for the next call (no drift).
+ *
+ * Counter 0 decrements 65535 → 0 → wraps to 65535. Wrap detected by
+ * `now > prev` (since normal flow is decrement). */
+static void AdvanceAlTimeFromPit(void)
+{
+    WORD  now;
+    DWORD diff;
+
+    now = ReadPitCounter();
+    if (now > prev_pit_count) {
+        /* Counter wrapped: prev cycles down to 0, then 65536 - now more. */
+        diff = (DWORD)prev_pit_count + (65536UL - (DWORD)now);
+    } else {
+        diff = (DWORD)(prev_pit_count - now);
+    }
+    prev_pit_count = now;
+    pit_accum     += diff;
+
+    while (pit_accum >= PIT_CYCLES_PER_IMF_TICK) {
+        pit_accum   -= PIT_CYCLES_PER_IMF_TICK;
+        alTimeCount += 1;
+    }
+}
+
 /* ---- IMF loader + scheduler (A.10) ---- */
 
 static int LoadAudioHeader(void)
@@ -258,15 +342,17 @@ static void StartMusic(void)
     }
 
     OplMusicReset();
-    sqHack       = (WORD *)(music_buf + 2);
-    sqHackPtr    = sqHack;
-    sqHackSeqLen = imf_len;
-    sqHackLen    = imf_len;
-    sqHackTime   = 0;
-    alTimeCount  = 0;
-    sqLastTick   = GetTickCount();
-    sqActive     = TRUE;
-    gAudioOn     = 1;
+    sqHack         = (WORD *)(music_buf + 2);
+    sqHackPtr      = sqHack;
+    sqHackSeqLen   = imf_len;
+    sqHackLen      = imf_len;
+    sqHackTime     = 0;
+    alTimeCount    = 0;
+    /* Initialize PIT-direct clock baseline. */
+    prev_pit_count = ReadPitCounter();
+    pit_accum      = 0;
+    sqActive       = TRUE;
+    gAudioOn       = 1;
 }
 
 static void StopMusic(void)
@@ -278,19 +364,27 @@ static void StopMusic(void)
 
 static void ServiceMusic(void)
 {
-    DWORD now, elapsed_ms, ticks_advance;
-    WORD  reg_val;
-    BYTE  reg, val;
-    WORD  delay;
+    WORD reg_val;
+    BYTE reg, val;
+    WORD delay;
 
     if (!sqActive) return;
 
-    now        = GetTickCount();
-    elapsed_ms = now - sqLastTick;
-    sqLastTick = now;
-    ticks_advance = (elapsed_ms * MUSIC_TICK_HZ) / 1000UL;
-    if (ticks_advance == 0) return;
-    alTimeCount += ticks_advance;
+    /* PIT-direct: alTimeCount advances at exact IMF tick rate independent
+     * of GetTickCount granularity. Each idle-loop call typically advances
+     * 0-1 ticks, naturally pacing event dispatch to the IMF stream rate. */
+    AdvanceAlTimeFromPit();
+
+    /* Skip-the-gap: if alTimeCount has overrun the next event's due time
+     * by more than 4 ticks (~5.7 ms), we just exited a paint or input
+     * stall. Snap alTimeCount back to sqHackTime so the while loop fires
+     * only the next chord, not the entire backlog in a compressed burst.
+     * Trade-off: brief out-of-phase from the 500 ms WM_TIMER heartbeat
+     * after each stall, in exchange for preserved note durations
+     * (no "mangiata" effect on short key-on/key-off pairs). */
+    if (alTimeCount > sqHackTime + 4) {
+        alTimeCount = sqHackTime;
+    }
 
     while (sqHackLen >= 4 && sqHackTime <= alTimeCount) {
         reg_val   = *sqHackPtr++;
@@ -303,10 +397,14 @@ static void ServiceMusic(void)
     }
 
     if (sqHackLen < 4) {
-        sqHackPtr   = sqHack;
-        sqHackLen   = sqHackSeqLen;
-        alTimeCount = 0;
-        sqHackTime  = 0;
+        sqHackPtr      = sqHack;
+        sqHackLen      = sqHackSeqLen;
+        alTimeCount    = 0;
+        sqHackTime     = 0;
+        /* Reset PIT baseline at loop point so accumulated wall-time
+         * during track end doesn't burst-fire the new track's intro. */
+        prev_pit_count = ReadPitCounter();
+        pit_accum      = 0;
     }
 }
 
@@ -983,6 +1081,9 @@ int PASCAL WinMain(HINSTANCE hInst, HINSTANCE hPrev, LPSTR cmd, int show)
             if (msg.message == WM_QUIT) return (int)msg.wParam;
             TranslateMessage(&msg);
             DispatchMessage(&msg);
+            /* A.10.1: also service music between dispatched messages so
+             * input bursts / palette messages don't starve the scheduler. */
+            if (sqActive) ServiceMusic();
         } else if (sqActive) {
             ServiceMusic();
         } else {

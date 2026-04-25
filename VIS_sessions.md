@@ -731,12 +731,68 @@ Fix candidates for A.10.1 (deferred — not blocking PoC):
 
 S6 wrap recommendation: start S7 with (1) A.10.1 polish (~30 min warm-up that eliminates a known audible defect), then attack (2) A.12 scaler — the last subsystem before the raycaster.
 
-### S6 wrap-up
+### S6 wrap-up (interim — A.11 closed, A.10.1 follows)
 
 Single milestone, single sitting, first-attempt build success, first-attempt MAME run validated by user. The "no new tech, careful integration" prediction held — every primitive (walls, sprites, minimap, cursor, music, click tones, perf erase/redraw) coexists in one frame without subsystem conflicts. The compatibility check the memo identified as the *purpose* of A.11 returned green: PeekMessage idle + dirty-rect blit + audio scheduler + HC input all interoperate cleanly.
 
-The only finding to carry forward is the IMF burst-processing diagnosis, which redirects the A.10.1 polish path away from "drift accumulator" (the S5 hypothesis) toward "cap events per call" (the S6 hypothesis based on user's musical-rhythm characterization). That's a smaller, more targeted fix than what was queued.
+The IMF burst-processing diagnosis carried over into the A.10.1 polish that ran immediately after A.11.
 
-With A.11 closed, the foundation is complete: the sprite scaler (A.12) and the raycaster (A.13) are the only two remaining unknowns to a playable Wolfenstein 3D PoC on Tandy/Memorex VIS.
+### Milestone A.10.1 — IMF burst polish (S6 follow-up)
+
+User confirmed momentum after A.11 success: "direi A.10.1 di polish, possiamo proseguire direttamente qui". Goal: eliminate the residual "stacchi" / "nota mangiata" effect in IMF playback. What followed was a multi-fix iteration that produced infrastructure improvements and platform diagnostics, but the user-perceived audio defect remained. The polish is now committed as **partial / infrastructural** and the residual artifact is documented as a known-limitation for future investigation.
+
+**Patch sequence (each tested in MAME between iterations):**
+
+1. **Events cap = 4 + service-after-dispatch + remove early-return on `ticks_advance == 0`.**
+   - Theory: post-WM_PAINT burst-drain compresses note timing.
+   - Fix: cap events per ServiceMusic call so backlog spreads across multiple idle iterations; service music between every dispatched message so paint stalls have a shorter window.
+   - Result: no perceptible change. Stacchi still present.
+
+2. **MMSYSTEM `timeGetTime` + `timeBeginPeriod(1)`.**
+   - Theory: GetTickCount on Modular Windows VIS is bound to the BIOS PIT (18.2 Hz) → 55 ms-quantized `elapsed_ms` is the real source of bursts.
+   - Fix: switch to `timeGetTime` for ms-precision, request 1 ms via `timeBeginPeriod`. MMSYSTEM.DLL is loaded by SYSTEM.INI so static-import is safe.
+   - **Result: hard regression — music plays at ~50 % speed.** Tempo halved exactly. Either MMSYSTEM on Modular Windows VIS uses a counter at half the wall-clock rate, or `timeBeginPeriod` reprograms a timer that `timeGetTime` then mis-reads. Reverted; documented as `reference_mmsystem_vis_half_rate`.
+
+3. **PIT-direct via latch read (port 0x43 mode 0x00 + two `inp(0x40)`).**
+   - Theory: bypass GetTickCount and MMSYSTEM altogether. Read PIT counter 0 directly for sub-ms precision. Counter 0 is shared with the BIOS PIT IRQ 0 handler, but that handler only increments BDA tick on wrap and never touches the counter, so latched reads are non-disruptive — no CLI/STI required.
+   - Implementation: `ReadPitCounter` (latch + 2 reads), `AdvanceAlTimeFromPit` (cycle-diff with wrap detection + fractional accumulator → IMF tick increments), wired into `ServiceMusic` and `StartMusic`.
+   - First test with theoretical divisor `PIT_CYCLES_PER_IMF_TICK = 1704` (1193182 / 700): music **very slow**.
+   - Calibration: empirically tried `852` (half). **Result: tempo correct.** This implies MAME-VIS emulates the PIT at ~596 kHz (half the 1.193 MHz standard PC rate), or BIOS programs counter 0 in mode 2 with a 596 kHz input clock derived from the 14.318 MHz OSC / 24. Either way, 852 visible-counter cycles = 1 IMF tick. Documented as `reference_pit_596khz_vis`.
+   - **Stacchi still present** even with hi-res clock running. So GetTickCount granularity was *not* the root cause of the artifact (or not the only one).
+
+4. **Skip-the-gap (`alTimeCount > sqHackTime + 4` → snap back).**
+   - Theory: even with PIT-direct, post-WM_PAINT (~50 ms) accumulates ~35 IMF ticks of backlog; the while loop drains all of them in a few hundred microseconds, compressing note durations.
+   - Fix: when alTimeCount runs >4 ticks (~5.7 ms) ahead of next event, snap alTimeCount back to sqHackTime. The while loop then fires only the next chord and exits; natural pacing resumes from there. Trade-off: brief out-of-phase from heartbeat after each stall, in exchange for preserved note durations.
+   - Result: no perceptible change. Either skip-the-gap rarely fires (PIT-direct already stays close to natural pace), or the artifact comes from elsewhere.
+
+5. **OplDelay sweep.**
+   - Theory: MAME-VIS OPL3 emulation may need different recovery timing between register writes; chord burst events too close together get merged.
+   - Doubled (12, 70) instead of (6, 35): **regression — note mangiate appear *earlier* in playback**.
+   - Halved (3, 17): no change vs baseline (6, 35).
+   - Conclusion: OplDelay below the original threshold is irrelevant; above it, things degrade. The OPL register-write timing is *not* the dimension causing the artifact. Restored canonical (6, 35).
+
+**Final state of `wolfvis_a11.c` (committed):**
+- PIT-direct clock with empirical 852 divisor — kept (gives sub-ms precision, infrastructural value for future work).
+- Skip-the-gap with threshold +4 — kept (defends against worst-case stalls even if doesn't fix the perceived artifact).
+- Service-after-dispatch — kept.
+- Events cap removed (PIT-direct natural pacing makes it redundant for steady-state).
+- OplDelay restored to canonical (6, 35).
+- GetTickCount logic removed; `sqLastTick` retained as a stub for symmetry but unused.
+
+**Unresolved hypotheses (deferred to S7+):**
+- (C) PIT wrap-detection edge case causing spurious alTimeCount jumps and triggering skip-the-gap spuriously. Requires runtime tracing/counter dump to validate.
+- (D) Modular Windows VIS owns its own timer ISR that touches PIT counter 0 between our latch and reads, breaking the non-disruptive assumption. Would require disassembly of MW timer driver.
+- (E) MAME OPL3 emulation in the `vis` driver has a higher minimum inter-event time than real Yamaha YMF262, causing chord events to drop voices at sub-ms spacing. Would require comparison with a known-good IMF player on emulated VIS, or running on real VIS hardware.
+- (F) The IMF stream itself has dense passages where, even at correct timing, OPL envelope ADSR doesn't have time to render coupled key-on/key-off pairs audibly. Would require comparing chunks 261, 263, 268, 285 etc. to see if the artifact is stream-specific or generic.
+
+**Why kept the partial fix instead of full revert:** PIT-direct + 852 divisor is platform knowledge worth committing — discovered by this session, useful for any future VIS audio/timing work. Skip-the-gap and service-after-dispatch are non-regressive (don't make anything worse, may help in some cases). The OplDelay value is the canonical Wolf3D one, restored. Net: code is at the diagnostic frontier with documented hypotheses, not in a worse state than baseline A.11.
+
+**Time spent:** ~50 min real-time on A.10.1 across 5 patch iterations. Original budget 30 min — overrun was OK because diagnostic mileage (MMSYSTEM regression, 596 kHz PIT, hypothesis space narrowed) was high and user explicitly extended the slot.
+
+### S6 final wrap-up
+
+Two milestones in one session: **A.11 (integrated scene)** clean first-attempt success, and **A.10.1 (IMF polish)** which closed as a partial/infrastructural milestone with diagnostic value but no audible improvement to the artifact. Wolf3D PoC remaining work narrows further: only A.12 sprite scaler and A.13 raycaster left as new subsystems. The audio polish sits in the "good enough for PoC" tier with documented reopening conditions if the artifact becomes blocking for the playable demo.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md updated together in the same commit (regola consolidated since S5).
 
 ---
