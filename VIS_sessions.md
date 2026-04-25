@@ -867,3 +867,133 @@ Single milestone, single sitting, first-attempt build success after one launch-c
 Workflow rule re-confirmed once more: code + VIS_sessions.md + README.md in the same commit.
 
 ---
+
+## Session 8 — 2026-04-25 — Milestone A.13 (raycaster) + native cursor suppression
+
+**Scope:** the headline milestone the whole port has been deferring. Foundation built across A.1..A.12 is consumed wholesale; A.13 adds a single new subsystem — the cast itself — over an already-proven column-walk renderer (A.12's `DrawSpriteScaled` inner loop, repurposed as a wall-strip). Plus a S8-only side fix: the VIS native arrow cursor that has been visible across every snapshot since A.6 is finally suppressed.
+
+User confirmed scope at session open: "affrontare finalmente il raycaster, forti delle fondamenta che abbiamo costruito".
+
+### Cursor suppression (S8 side fix)
+
+Long-standing leftover the user surfaced at session open: a system arrow cursor visible in every snapshot since A.6, shown over our framebuf even though our app never asked for it. Confirmed by user-supplied snapshot 0001.png from S6 (a clear ~10 px white arrow over the "C" of DeathCam). It is **not** a MAME overlay (`-nomouse` already passed); it's the Modular Windows native cursor that MW renders on its own because the hand-controller subsystem produces cursor events.
+
+Three-point fix applied in `wolfvis_a13.c`:
+1. `wc.hCursor = NULL` in WNDCLASS — no class default cursor.
+2. `case WM_SETCURSOR: SetCursor(NULL); return TRUE;` — explicit suppression when the mouse / HC enters our client area.
+3. `ShowCursor(FALSE)` after `CreateWindow` — backstop the global cursor counter.
+
+Confirmed working in A.13 snapshots 0003.png / 0004.png / 0005.png — the arrow is gone in all three, even when overlapping the wall textures, the player marker, and the heading line. All three points kept (intentional redundancy: we do not know in this firmware which of the three actually wins, and the cost is three lines).
+
+### Layout 320×200 (A.13)
+
+| y | x | content |
+|---|---|---|
+| 0..29 | 0..319 | Debug bar (heartbeat, status, bit grids) — repainted on WM_TIMER |
+| 30..34 | 0..319 | Black gutter |
+| 35..162 | 0..127 | **3D viewport 128×128** — 128 ray casts, ceiling / textured wall / floor |
+| 35..98 | 140..203 | Minimap 64×64 with player position dot + heading line |
+| 99..162 | 140..319 | Black |
+| 163..199 | 0..319 | Black |
+
+Cursor HC custom dropped from this milestone: the d-pad now rotates and moves the player, not a cursor. The minimap player dot is the only on-screen indication of position.
+
+### Player + ray model
+
+Player state in Q8.8 tile units:
+- `g_px, g_py` = position (long), `g_pa` = angle 0..1023 (int).
+- Coordinate convention: X+ east, Y+ south (matches Wolf3D map storage).
+- Angle convention: 0 = E (+X), 256 = S (+Y), 512 = W, 768 = N.
+
+`InitPlayer` walks `map_plane1` looking for spawn markers `19/20/21/22` (Wolf3D N/E/S/W player object IDs). On E1L1 this yields a real spawn position and heading. Falls back to first non-wall tile + east if no marker found.
+
+`IsWall` treats both wall tiles `1..63` and door tiles `90..101` as blocking. Doors render with a fallback wall texture for now (no door logic in A.13 — that's a future milestone).
+
+`TileToWallTex` maps Wolf3D wall ID → VSWAP page modulo `WALL_COUNT=8` (we load the first 8 wall pages, A.4 used 4). The Wolf3D `(tile-1)*2` formula gives a "light face" page; we ignore the dark-face variant to keep memory flat.
+
+### Cast algorithm (PoC step-by-fraction)
+
+For each viewport column `col ∈ [0, VIEW_W)`:
+1. `half_fov_a = (col - VIEW_W/2) * FOV_ANGLES / VIEW_W`, where `FOV_ANGLES=192` over `ANGLES=1024` → ~67.5° total horizontal FOV.
+2. `ra = (g_pa + half_fov_a) & ANGLE_MASK`.
+3. `CastRay(ra)` returns Euclidean distance + `tex_idx` + `tex_x`.
+4. Fish-eye correction: `perp_dist = dist * cos(half_fov_a)` via `fov_correct[col]` precomputed Q15 cos table.
+5. `DrawWallStripCol(col, perp_dist, tex_idx, tex_x)`.
+
+`CastRay` advances the ray in 1/16-tile sub-steps and watches for the integer tile (tx, ty) to change. When it does, it picks the wall side (X-face vs Y-face) based on which axis crossed last in the sub-step (sub-tile fractional positions) and reads the texture column offset from the perpendicular fractional coordinate. This is **not** the canonical Wolf3D grid-line DDA — it's a step-by-fraction approximation that's robust to write the first time and trivially debuggable. The Wolf3D-style grid-line DDA is the obvious A.13.1 polish if perf demands it; the PoC at 128 columns × ~50 sub-steps avg already runs faster than user input, so polish is deferred.
+
+Distance is computed via `dx_total / cos(ra)` (X-side) or `dy_total / sin(ra)` (Y-side), both Q8.8. Clamped to ≥ 16 (1/16 tile) to avoid a divide-by-near-zero blowing up `wall_h`.
+
+### Wall-strip renderer
+
+`DrawWallStripCol` is the column-walk pattern from A.12's `DrawSpriteScaled` inner loop with the source swapped: instead of walking sprite post triples, we sample `walls[tex_idx][tex_x*64 + sy_src]`. The rest is identical math:
+- `wall_h_pixels = (VIEW_H * 256) / perp_dist_q88` — height in pixels.
+- `dy_top = VIEW_CY - wall_h/2`, `dy_bot = dy_top + wall_h`.
+- Texture sample step: `sy_step = (64 << 16) / wall_h` in Q16.16.
+- Inner loop: `sy_src = sy_acc >> 16; framebuf[fb_y][sx] = texcol[sy_src]; sy_acc += sy_step;`.
+- Above `dy_top`: ceiling solid color. Below `dy_bot`: floor solid color.
+
+When `dy_top` is above the viewport top (very close walls), we pre-advance `sy_acc` by `sy_step * (VIEW_Y0 - dy_top)` so the visible portion samples the correct vertical center of the texture. This is the same clipping pattern A.12 ended up needing for very-large sprites.
+
+Eureka S7.E1 prediction held perfectly: the inner loop is a near-exact copy of `DrawSpriteScaled`'s, with the post-walk replaced by a single linear sample. The scaler was indeed the wall-strip's seed.
+
+### Memory layout
+
+- `walls[8][4096]` → 32 KB `__far` (was 16 KB / 4 walls in A.11; A.13 doubled to vary tile textures).
+- `sin_q15_lut[1024]` → 2 KB `__far const` (auto-generated `wolfvis_a13_sintab.h`).
+- `fov_correct[128]` → 256 B `__far` (init at boot from `sin_q15_lut`).
+- `map_plane0/1`, `map_headeroffs`, `audio_offsets`, `music_buf` → kept `__far` from A.10/A.11.
+- DGROUP stays comfortably under 64 KB; final EXE 220 KB.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a13.obj wolfvis_a13.c` — clean, no warnings.
+- Link: `wlink @link_wolfvis_a13.lnk` — same `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` as A.8+.
+- Output: `build/WOLFA13.EXE` (220 KB), `build/wolfvis_a13.iso` (1.16 MB).
+
+### Result
+
+Confirmed working on MAME 0.287 vis after one fix iteration (see Trap S8.1 below). Snapshots `snap/vis/0003.png`, `0004.png`, `0005.png` show three different player orientations:
+- Stone walls with embedded Hitler poster textures (Wolf3D wall pages 0, 2, 4, 6 from VSWAP), correctly perspective-scaled.
+- Vanishing point at viewport center; nearer walls larger, distant walls smaller, no fish-eye distortion.
+- Mid-grey ceiling above, dark-grey floor below.
+- Minimap at right with player position dot (cyan) + heading line (white).
+- Native VIS cursor absent in all three snapshots.
+
+User confirmation: "Sembra tutto OK!"
+
+### Trap / Gotcha / Eureka (S8)
+
+- **Trap S8.1 — `<math.h>` in Watcom Win16 large model trips WIN87EM.DLL load.** First A.13 build used `sin()` in `InitTrig` to populate `sin_q15[ANGLES]`. EXE built clean (231 KB), but on MAME-VIS the firmware showed "Error loading WOLFA13.EXE" → loop reset to PROGMAN — the same regression that hit pre-A.1 era. Cause: any `<math.h>` FP call drags Watcom's FP emulation runtime into the EXE, which expects `WIN87EM.DLL` at load time. Modular Windows VIS does not ship `WIN87EM.DLL`. Fix: precompute the 1024-entry Q15 sine table at *build* time via a Python helper (4-line generator in shell), embed as `static const int __far sin_q15_lut[1024]` in `wolfvis_a13_sintab.h`, drop `#include <math.h>` and the `sin()` call. EXE shrank to 220 KB (the 11 KB delta = the FP runtime that's no longer linked). Fingerprint for future regressions: EXE size jump + "Error loading" boot loop after adding any `<math.h>` symbol. Documented in new memory `reference_win87em_trap.md`.
+- **Eureka S8.E1 — Column-walk renderer reuses across sprite scaler and raycaster wall-strip with one swap.** A.12's `DrawSpriteScaled` and A.13's `DrawWallStripCol` are structurally identical: outer loop over destination columns, inner loop over destination rows, fixed-point step `sy_step = (src_h << 16) / dest_h`, sample `framebuf[dy] = src[sy_src >> 16]`. The only difference is whether `src` is a sprite post chain (variable-length per-column data) or a contiguous 64-byte texture column. Eureka S7.E1 explicitly predicted this; A.13 confirmed at code-write time, before the first build attempt. The pattern generalizes further: any future textured renderer (floor/ceiling cast, sprite-in-world cast, weapon overlay scaler) is the same loop with a different source.
+- **Eureka S8.E2 — Native cursor suppression takes three lines, not three sessions.** The native VIS cursor was visible in every PoC snapshot from A.6 onward (~7 sessions). Treated as "annoying but defer" until S8 user surfaced it. The three-point fix (WNDCLASS hCursor=NULL + WM_SETCURSOR + ShowCursor(FALSE)) is canonical Win 3.x / Win16, took ~5 minutes including reasoning, and worked first try on MAME-VIS. Lesson: cosmetic-but-trivially-fixable defects deserve a "fix-now" tier separate from "polish-later" — three lines that have been waiting seven sessions cost more in user-friction than in code review.
+- **Eureka S8.E3 — Spawn-marker scan from `map_plane1` is portable across every Wolf3D map.** `InitPlayer` walks the loaded plane1 looking for object IDs 19/20/21/22 and reads position + facing from the first match. No hardcoded coordinates per level; future level switches (E1L2, E1L3, ...) reuse the same bootstrap with no edit. The fallback "first non-wall tile, facing east" path catches the case where the map data is malformed or the markers aren't placed (custom map, demo data corruption, etc.).
+
+### Concrete results
+
+- New: `src/wolfvis_a13.c` (~830 LOC), `src/wolfvis_a13_sintab.h` (Python-generated Q15 sine LUT), `src/link_wolfvis_a13.lnk`, `src/build_wolfvis_a13.bat`, `src/mkiso_a13.py`.
+- New: `cd_root_a13/` (9 files: A.12 set with WOLFA13.EXE + SYSTEM.INI updated to `shell=a:\WOLFA13.EXE`).
+- New: `build/WOLFA13.EXE` (220 KB), `build/wolfvis_a13.iso` (1.16 MB).
+- New: `snap/vis/0003.png`, `0004.png`, `0005.png` (three player orientations in E1L1 with textured walls + minimap + no native cursor).
+- New memory: `reference_win87em_trap.md` (added to MEMORY.md index).
+- README status table: A.13 ✅. Quick-start build/launch commands updated to reference A.13 binaries (and to include `-nomouse` consistently).
+
+### Next-step candidates for Session 9
+
+1. **A.13.1 — Polish.** Grid-line DDA replacing step-by-fraction (cheaper, sub-pixel-exact texture coords). Light-by-distance shading (Wolf3D's per-distance palette ramp). Door rendering (tile 90..101 should render with a different texture and a thinner profile). Low individual cost but each improves the render quality visibly.
+2. **A.14 — Sprites in world.** Place the loaded sprite gallery (Demo / DeathCam / STAT_0) as billboards in E1L1, transform-and-clip per frame, sort by distance, render after walls with z-buffer or painter's algorithm. Reuses A.5 `DrawSprite` and A.12's scaling math. The first time the player sees a Wolf3D guard in 3D space.
+3. **A.10.1 reopen.** IMF stacchi — start from hypothesis E (test other music chunks 263, 268, 285) per the partial memo. Should now happen before any "playable demo" showcase.
+4. **A.15 — HUD.** BJ face, ammo, score box at bottom of screen. Cosmetic; uses A.5 sprite blits and a tiny number-rendering routine.
+5. **`hcControl HC_SET_KEYMAP`**. Remap `VK_HC1_*` to standard VK codes for ergonomic switch-cases. Cosmetic.
+
+S8 wrap recommendation: A.13.1 polish + A.14 sprites-in-world together would deliver the first "this is recognizably Wolfenstein 3D running on a 1992 console" visual. Roughly the size of A.10+A.11 combined — one full session.
+
+### S8 wrap-up
+
+Single milestone, single sitting, one-iteration recovery from the WIN87EM trap. The headline structural unknown of the entire VIS Wolf3D port — the raycaster — is now closed. Foundation chain A.1..A.12 paid off exactly as A.7+A.12 memos predicted: the renderer was a 100-line addition to a 700-line baseline, no architectural change, no new BSS pattern (just a Python-generated LUT), no MAME-side regression on any prior subsystem. The "raycaster gentle" rule held to the letter: by the time we touched the cast, every other subsystem was green and the only failure mode was the FP-runtime side path, which had nothing to do with the cast itself.
+
+Bonus deliverable: native cursor suppression that has been a visible-but-deferred defect for seven sessions, dispatched in 5 minutes inside the same milestone.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit.
+
+---

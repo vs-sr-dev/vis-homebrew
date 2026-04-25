@@ -23,7 +23,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.10 — IMF music | AUDIOT.WL1 / AUDIOHED.WL1 parser + IMF event scheduler over OPL3 (PoC) | ✅ |
 | A.11 — Integrated scene | Walls + sprites + minimap + cursor + audio composited in one frame | ✅ |
 | A.12 — Sprite scaler | Per-column post-walk fixed-point scaler over t_compshape sprites | ✅ |
-| A.13 — Raycaster | WL_DRAW port over the existing foundation | 🚧 next |
+| A.13 — Raycaster | Textured wall casting (DDA step-by-fraction) + ceiling/floor + player nav | ✅ |
 
 ## Repository layout
 
@@ -58,14 +58,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a12.bat"    # produces build/WOLFA12.EXE
-python mkiso_a12.py                 # produces build/wolfvis_a12.iso
+cmd /c ".\build_wolfvis_a13.bat"    # produces build/WOLFA13.EXE
+python mkiso_a13.py                 # produces build/wolfvis_a13.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a12.iso -window -nomax -skip_gameinfo
+mame -rompath . vis -cdrom build/wolfvis_a13.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

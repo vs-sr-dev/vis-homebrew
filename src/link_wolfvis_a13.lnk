@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA13.EXE
+FILE          ..\build\wolfvis_a13.obj
+OPTION        MAP=..\build\WOLFA13.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.13 raycaster (textured walls + ceiling/floor + player nav)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
