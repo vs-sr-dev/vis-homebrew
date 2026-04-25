@@ -1920,3 +1920,92 @@ User experience arc S14: open with "ci sta, seguiamo pure A" (default A.18 chose
 Workflow rule re-confirmed (third time this S): code + VIS_sessions.md + README.md + memory in the same commit. A.18 and A.15.1 each got their own commit (two milestones, two commits), pushed sequentially.
 
 ---
+
+## Session 15 — 2026-04-25 — Milestone A.19 centered viewport + minimap toggle (PF finale step 1)
+
+### Scope
+
+S15 opens with a strategic deviation from the original PF roadmap. The opening TODO planned split telemetry first ("measure before optimizing"); the user redirected to a layout rework as the actual S15 first move: remove the per-frame minimap, center the viewport, bind the minimap to a controller toggle. Three reasons this beats the telemetry-first plan:
+
+1. **Captures H2 directly without measurement**. The pre-S15 hot-path sweep had identified DrawMinimapWithPlayer as ~25-30 ms/frame (4096 FB_Put calls × 4 bound checks × 1 long mul each, on 64×64 minimap). Removing it from the per-frame path is a sure win independent of telemetry.
+2. **UX win bundled with perf win**. Centered viewport feels more like vanilla Wolf3D symmetric layout; toggle-on-demand is more useful than always-visible because the corner minimap was small enough to be legible-only-when-stopped anyway.
+3. **Clean prerequisite for split telemetry**. With H2 gone, when we DO add the 5 sub-counters in a future milestone, we will be measuring the actually-interesting subsystems (cast / wall / sprite / paint) without the minimap noise dominating the budget.
+
+Recon: ~10 minutes reading `programmers_ref.txt` (because the user revealed `D:\Homebrew4\VIS\docs\programmers_ref.pdf` exists at session start) — yielded the bonus discovery `EnterDVA(DVA_MODE_320x200x8 | DISPLAYDIB_NOWAIT)` macro plus the `extern WORD _A000h` selector idiom for direct framebuffer access. This unblocks the S3-parked DispDib bypass: a future milestone can map the bottom-up DIB blit to direct A000:0000 writes, eliminating StretchDIBits cost. NOT used in A.19 itself (out of scope), but captured in the new milestone memo.
+
+User direction quotes: "Io direi piuttosto di partire con il togliere la minimappa e centrare la vista di gioco - mappiamo la minimappa a un terzo tasto del controller per swapparla alla vista di gioco - guadagno netto immediato." Followed by F1/F3 music keys reclamation: "i tasti mappati a music adesso non ci interessano, erano solo test di debug, verranno sostituiti appunto da map e toggle strafe."
+
+### Implementation (~30 min)
+
+Single source file `src/wolfvis_a19.c` (~3400 LOC, +~30 LOC vs A.15.1). Six additive changes on the A.15.1 baseline:
+
+- **Layout**. `VIEW_X0` 0 → 96. Viewport 128×128 now occupies x=96..223 of the 320-wide screen. The new margins (x=0..95 and x=224..319 in y=35..162) stay at the ClearFrame boot color (black), never overwritten per frame, zero cost. Crosshair and weapon overlay positions track VIEW_X0 automatically (both reference VIEW_X0 + VIEW_W/2 as constants). HUD (y=163..199) and debug bar (y=0..29) untouched.
+- **Minimap origin**. New `MINIMAP_VIEW_X0 = VIEW_X0 + (VIEW_W - MAP_W)/2 = 128` and `MINIMAP_VIEW_Y0 = VIEW_Y0 + (VIEW_H - MAP_H)/2 = 67` for the centered 64×64 minimap-mode location. Old `MINIMAP_X0=140 / Y0=35` constants kept as harmless dead defines.
+- **`DrawMinimapView()` (was `DrawMinimapWithPlayer`)**. Same body as A.15.1 per-frame minimap function, retargeted to MINIMAP_VIEW_X0/Y0 + prefixed with `FB_FillRect(VIEW_X0, VIEW_Y0, VIEW_W, VIEW_H, MINIMAP_BG)` to wipe the previous-frame raycaster scene. Player dot (3×3 cyan) + heading line still drawn after the tile pass.
+- **`g_show_minimap` BOOL**. Default 0 (FALSE). Toggled on F1 keydown.
+- **Input rebind**. `VK_HC1_F1` (0x71, Xbox X) toggles g_show_minimap and forces InvalidatePlayerView. `VK_HC1_F3` (0x73, Xbox Y) becomes a no-op reservation for the future strafe-toggle milestone. The A.10..A.15.1 music start/stop bindings are dropped; the OPL3 + IMF subsystem remains in the binary (sqActive=FALSE = zero per-frame cost, future re-enable trivial).
+- **Dispatch**. `InvalidatePlayerView` branches on `g_show_minimap`: minimap-mode → DrawMinimapView() only; raycaster mode → DrawViewport() + DrawCrosshair() (crosshair suppressed in minimap mode, would distract). Initial WinMain render mirror-dispatches from g_show_minimap. Dirty rect reduced to viewport-only (was VIEW_X0..MINIMAP_X0+MAP_W).
+- **Window class**. `WolfVISa15` → `WolfVISa19`.
+
+### Build
+
+- Compile + link: clean, single-iteration zero-fix. `WOLFA19.EXE` 230 KB. `wolfvis_a19.iso` 1.46 MB.
+- Build trap S12 recurred: `cmd //c build_wolfvis_a19.bat` from bash with relative path failed. Pivot to PowerShell tool with absolute path per `reference_build_bat_invocation.md` — first-try success.
+- MAME launch trap recurred: first launch missed `-rompath d:\Homebrew4\VIS` flag, MAME exited immediately because `vis.zip` not found. Re-launch with rompath + `-skip_gameinfo` per `reference_toolchain_paths.md` — clean run 59s @ 100% emulation speed.
+
+### Result
+
+User test verdict: "Tutto perfetto, swap map button funzionante, FPS MOLTO migliorati, è QUASI già giocabile così. Rimane il problema grosso delle guardie vicine (stavolta si è proprio freezzato)."
+
+Three observations:
+
+1. **Layout + toggle work end-to-end.** Centered viewport renders correctly, F1 swaps to centered minimap, F1 swaps back. Confirmed.
+2. **FPS materially improved.** First milestone where the user describes the gameplay framerate as "QUASI giocabile" (almost playable). Pre-A.19 was "non giocabile neanche suboptimal" per S15 opening message. The H2 hot path freed an estimated 25-30 ms/frame; on a 200 ms baseline that is a 12-15% absolute reduction → from ~5 FPS to ~6-7 FPS for ordinary scenes. The felt improvement compounds with the dirty-rect reduction (smaller InvalidateRect = smaller WM_PAINT region per frame).
+3. **Close-enemy freeze NOT slowdown.** A.18 had observed "rallenta con guardie vicine"; A.19 reports the more severe failure mode "stavolta si è proprio freezzato". This is the H1 sprite-divisor explosion — when sprite_h saturates at 4×VIEW_H = 512 px (cam_y small near-clip → (VIEW_H<<8)/cam_y = 1024 → clamped 512), DrawSpriteWorld inner loop runs ~80 visible columns × 512 pixels × ~250 cyc per pixel (long div + long mul) = ~10M cyc per sprite per frame ≈ 830 ms apparent freeze. Two near-clip guards visible simultaneously = >1.5 s per frame, indistinguishable from a hang. **Confirms H1 as next priority.**
+
+### Trap / Gotcha / Eureka (S15.A.19)
+
+- **Eureka S15.A.19.E1 — programmers_ref.txt is a goldmine**. The user revealed the doc exists; ~10 min of grep gave us:
+  (a) `EnterDVA(DVA_MODE_320x200x8|DISPLAYDIB_NOWAIT)` is the canonical path the S3 DispDib parking missed (we were brute-forcing `DisplayDib(BEGIN|NOWAIT)` flag values; the right API is the separate EnterDVA macro that switches video mode WITHOUT blitting).
+  (b) `extern WORD _A000h` exported by the Windows Kernel module gives a far selector for direct framebuffer access (lpA000 = MAKELONG(0L, &_A000h)).
+  (c) `DISPLAYDIB_CONTINUE` flag for in-DVA-mode blits without re-setting video mode.
+  (d) `[tvvga] resolution=320x200x8` in SYSTEM.INI puts TVVGA.DRV in native 320x200x8 mode (we already use this) so StretchDIBits becomes a 1:1 BitBlt.
+  This unparks `project_dispdib_parked.md`. A future milestone can tear out StretchDIBits entirely and write to A000:0000 directly. Not in A.19 scope but captured.
+
+- **Eureka S15.A.19.E2 — "remove a hot path" beats "optimize a hot path".** The minimap was 25-30 ms/frame BEFORE we ever measured. Removing it (= making it conditional on a button toggle) is strictly faster than any micro-optimization to FB_Put + DrawMinimapWithPlayer. Pattern: when the cost is per-frame and the feature is not always needed, "make it on-demand" is a free perf win that no profiling can find. Distinct from "reduce the cost of a feature you must always render".
+
+- **Trap S15.A.19.1 — `cmd //c` from bash with relative path** (RECURRING). Already documented in `reference_build_bat_invocation.md`. Pivoted to PowerShell tool with absolute path on first re-try.
+
+- **Trap S15.A.19.2 — MAME launch without `-rompath`**. Already documented in `reference_toolchain_paths.md`. MAME exited silently (clean exit code 0, no error) on first launch. Re-launch with `-rompath d:\Homebrew4\VIS -skip_gameinfo` worked first try.
+
+- **No iteration cycles.** Single-iter zero-fix milestone (recon-first now 9-for-9 on multi-subsystem milestones). Total time end-to-end: ~50 min real-time (recon 10 min + impl 30 min + build/test/wrap-to-follow 10 min).
+
+### Concrete results
+
+- New: `src/wolfvis_a19.c` (~3400 LOC), `src/build_wolfvis_a19.bat`, `src/link_wolfvis_a19.lnk`, `src/mkiso_a19.py`.
+- New: `cd_root_a19/` (12 files: A.15.1 set with `WOLFA19.EXE` + `SYSTEM.INI` updated `shell=a:\WOLFA19.EXE`).
+- New: `build/WOLFA19.EXE` (230 KB), `build/wolfvis_a19.iso` (1.46 MB).
+- README: A.19 row added, quick-start updated to A.19.
+- Memory: `project_milestone_A19_layout.md` (NEW), `MEMORY.md` index updated.
+
+### Next-step candidates for Session 15 cont. or Session 16
+
+1. **A.19.1 — Sprite scaler accumulator** (PF finale step 2). Replace per-pixel long division in DrawSpriteWorld inner loop with sy_acc/sy_step Q.16 accumulator pattern (DrawWallStripCol is the in-codebase reference). Removes the divisor-explosion when guards are very close. Stops the close-enemy freeze. Estimated: 30-45 min impl. **PRIORITY** — the close-enemy freeze blocks gameplay testing.
+2. **A.19.2 — Top-down DIB orientation flip + WORD ceiling/floor**. Two micro-wins bundled: bottom-up→top-down DIB eliminates the (SCR_H-1)-sy inversion in every pixel write, ceiling/floor fills become single WORD store (paired byte writes → 1 word write). Estimated: 30-45 min.
+3. **A.19.3 — Split telemetry**. 5 PIT-direct sub-counters (cast / wall / sprite / overlay / paint). Now valuable BECAUSE the layout rework removed the dominant H2 noise — measurements will isolate the actual remaining bottlenecks. Estimated: 30-45 min.
+4. **A.20 — Enemy firing back** (was original A.19 from S14 roadmap, deferred). Symmetric combat loop closure — needs A.19.1 first so close-quarters combat is testable.
+5. **A.21 — `EnterDVA` direct-framebuffer write** (was S15c stretch, now realistic post-A.19.1). Eliminate StretchDIBits, write directly to A000:0000. Potential 30-50% speedup on top of A.19.1-3 micro-wins. Estimated: 1.5-2 h with `programmers_ref.txt` API doc as recon.
+
+S15 cont. recommendation: **A.19.1 next**. The close-enemy freeze is now the gating issue for "actually playable", and the sprite scaler accumulator is a known-good technique (DrawWallStripCol is the reference pattern in our own codebase). After A.19.1, A.19.3 telemetry becomes the cleanest tool to pick A.19.2 vs A.21 next.
+
+### S15 wrap (so far)
+
+Single milestone, single iteration, zero fixes. ~30 LOC of new code touching 6 subsystems compiled clean first try. Total time ~50 min real-time vs. an open-ended budget. The "QUASI giocabile" verdict is the best UX-progress signal of the project so far — first time the user describes the framerate as in-the-vicinity of usable.
+
+The session opened with a strategic recommendation from the assistant (split-telemetry-first) that the user overrode with a stronger move (layout rework first). The user intuition was correct: removing the minimap captured the H2 hot path AND yielded a UX win (centered viewport + on-demand toggle), where the assistant plan would have measured H2 to confirm what was already known. Pattern worth recording for the future: when the hot-path candidates are well-bounded BY ANALYSIS, "kill the cost" is faster than "measure the cost". Telemetry stays valuable for the LESS-bounded next round (cast vs paint vs sprite ratio is now what we don't know).
+
+The programmers_ref.txt discovery is a high-value side effect. EnterDVA + _A000h selector unparks DispDib (S3 dead end) and gives a clear path to bypassing GDI entirely in a future milestone.
+
+Workflow rule re-confirmed (4th time): code + VIS_sessions.md + README.md + memory in the same commit.
+
+---

@@ -33,6 +33,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.17 — Weapon overlay | Vanilla SPR_PISTOLREADY blitted at viewport bottom-center, runtime chunk discovery (`total_sprites - 15`), 1:1 fixed-position blit via DrawSpriteFixed | ✅ |
 | A.18 — Firing + hitscan + damage | PRIMARY rebind (door → SECONDARY), 4-frame ATK animation (PISTOLATK1..4 hot-swap), hitscan via z-buffer + first-hit screen-span scan, damage 5..12 + 3-frame DIE → frozen DEAD, ammo + score HUD partial re-blit | ✅ |
 | A.15.1 — Real BJ face on HUD | VGAGRAPH chunked Huffman loader (VGADICT + VGAHEAD + VGAGRAPH), HuffExpand + 4-plane → linear deplane, FACE1APIC chunk 121 (empirical, not enum 113), 24×32 baked into static_bg, fallback to placeholder on load fail. Bundled fix: cardinal-angle DDA nudge for centre-column wall bleed | ✅ |
+| A.19 — Centered viewport + minimap toggle (PF finale step 1) | `VIEW_X0` 0 → 96 (viewport horizontally centered), per-frame `DrawMinimapWithPlayer` removed (~25–30 ms/frame freed — H2 hot path captured), `VK_HC1_F1` (Xbox X) toggles a 64×64 centered minimap overlay, music F1/F3 debug bindings dropped (OPL/IMF infra dormant). User confirms "QUASI giocabile" — first PoC milestone where the gameplay framerate becomes usable for real navigation | ✅ |
 
 ## Repository layout
 
@@ -67,14 +68,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a151.bat"    # produces build/WOLFA151.EXE
-python mkiso_a151.py                 # produces build/wolfvis_a151.iso
+cmd /c ".\build_wolfvis_a19.bat"     # produces build/WOLFA19.EXE
+python mkiso_a19.py                  # produces build/wolfvis_a19.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a151.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a19.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

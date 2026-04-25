@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA19.EXE
+FILE          ..\build\wolfvis_a19.obj
+OPTION        MAP=..\build\WOLFA19.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.19 centered viewport + minimap toggle on F1'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
