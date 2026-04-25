@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA151.EXE
+FILE          ..\build\wolfvis_a151.obj
+OPTION        MAP=..\build\WOLFA151.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.15.1 real BJ face on HUD via VGAGRAPH chunked Huffman'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

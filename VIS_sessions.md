@@ -1812,3 +1812,111 @@ The `g_zbuffer[VIEW_W/2]` shortcut for the wall-vs-bullet occlusion is the kind 
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md + memory in the same commit.
 
 ---
+
+## Session 14 (cont.) — 2026-04-25 — Milestone A.15.1 real BJ face from VGAGRAPH
+
+### Scope
+
+S14 stretch. Validate the third Wolf3D asset format — chunked Huffman pic compression used for menu / HUD / intermission graphics — by replacing the A.15 primitive helmet placeholder on the HUD face panel with the canonical SPR_GRD_FACE1APIC (full-health, looking straight) loaded from `VGAGRAPH.WL1`. Static bake into `static_bg` (no per-frame cost); state-driven face animation deferred to A.19 alongside player damage. PoC scope: prove the loader + Huffman + deplane work, validate the HUD aesthetic, expose the asset format for future VGAGRAPH consumers (HEALTHPIC, AMMOPIC small icons, title/menu pics).
+
+User direction: "Devo dire comunque che sono piacevolmente sorpreso - dopo i vari problemi delle prime sessioni, qui sta andando letteralmente tutto liscio first try da diverse sessioni" (post-A.18 wrap, before A.15.1) → "Fai pure push, poi direi facciamo A.15.1, così validiamo l'hud" (after S14 push). The "validate the HUD" framing locked the scope: one face frame, full bake into static_bg, no state machine yet.
+
+### Recon (~10 min)
+
+Pre-coding pass over `wolf3d/WOLFSRC/`:
+- **`GFXV_WL1.H:123`** — FACE1APIC enumerated as chunk 113 in the linker enum.
+- **`GFXV_WL1.H:179`** — NUMPICS = 136 in the build header.
+- **`ID_CA.C:418`** — `CAL_HuffExpand`: bit-streamed expander, head node = 254, codes < 256 = literal byte, codes >= 256 = next node index (after `CAL_OptimizeNodes` it becomes a byte offset, but for portable C we keep index 0..255).
+- **`ID_CA.C:130-150`** — VGAHEAD format: 24-bit LE chunk offsets, packed 3 B per entry. `FILEPOSSIZE = 3` for shareware/Wolf3D.
+- **`ID_CA.C:1261-1295`** — chunk format: first 4 B = expanded length LE, then Huffman payload. Compressed length = `GRFILEPOS(c+1) - GRFILEPOS(c) - 4`.
+- **`ID_VL.C:791-810`** — `VL_MemToScreen`: 4-plane chunky-pixel layout. Each pic byte is one pixel (8-bit gamepal index); the bytes are interleaved across 4 planes by column (plane = x % 4). Source layout for a w×h pic: `plane[p][y][c]` at offset `p*planebytes + y*(w/4) + c`.
+
+**Empirical recon (`reverse/decode_vgagraph.py`)**: Python helper that loads the dictionary, decodes the head, expands chunk 0, dumps the pictable. **Critical finding**: WL1 shareware on-disk pictable has **144 entries**, not the 136 in `GFXV_WL1.H`. FACE1APIC sits at chunk **121**, not 113 — chunks 113..120 are 8×16 pics (status icons KEY1..). The linker enum was written for a different build configuration; the shipped WL1 asset was rebuilt with extra interstitial pics. **Lesson**: trust the on-disk pictable, not the enum offsets, when the chunk indices are not pre-validated by another mechanism (A.17's `total_sprites - 15` happened to match the enum by accident; for VGAGRAPH the gap is real).
+
+Confirmed: FACE1APIC = chunk 121, 24×32 px, 768 B expanded, ~787 B compressed, 4-plane layout (192 B per plane × 4 planes).
+
+### Implementation
+
+Single source file `src/wolfvis_a151.c` (~3380 LOC, +~170 vs A.18). Six additive changes on the A.18 baseline:
+
+- **VGAGRAPH state**. `huff_b0[256] / huff_b1[256] __far` (parallel WORD arrays, 2 KB), `grstarts[157] __far` (DWORD chunk-offset table, 628 B), `face_pic[768] __far` (deplaned chunky bitmap), `face_temp_planar[768] __far` (Huffman expand target), `face_comp[1024] __far` (compressed-data scratch). All BSS, ~5 KB total — negligible.
+- **`HuffExpand(src, dst, length)`**. Bit-streamed Huffman expander, portable C mirror of `CAL_HuffExpand` from id_ca.c. Head node = 254. Single-byte loop (we expand only 768 B, well under the 64 KB asm split). `bit <<= 1` then `if (bit == 0)` next-byte fetch (relies on byte-rollover; works on any 286+).
+- **`DeplanePic24x32(src, dst)`**. Triple-loop deplane: for each plane (0..3) × row (0..31) × col-in-plane (0..5), copy `src[src_off++]` to `dst[y*W + (c*4 + p)]`. Result: row-major linear bitmap with each byte = gamepal index.
+- **`LoadVgaFace()` orchestration**. Three sub-loaders (`LoadVgaDict` / `LoadVgaHead` / `LoadVgaFace` proper). Reads VGADICT into the parallel huff arrays, VGAHEAD into the 24-bit-decoded grstarts, then VGAGRAPH chunk 121 (seek to grstarts[121], read 4 B expanded length, read remaining bytes compressed, HuffExpand to face_temp_planar, DeplanePic24x32 to face_pic). Returns numeric error code on failure (100..307 ranges encode which sub-step broke).
+- **`DrawFacePic(x0, y0)`**. 1:1 chunky blit, two nested loops over face_pic. If `gVgaFaceErr != 0` falls back to `DrawFacePlaceholder(x0, y0)` so the HUD never has a hole.
+- **HUD panel layout**: `DrawHUD` calls `DrawFacePic(FACE_HUD_X=148, FACE_HUD_Y=166)` instead of `DrawFacePlaceholder(148, 170)`. y shifted from 170 to 166 because the real face is 32 px tall (vs 24 placeholder); 170 + 32 = 202 > SCR_H=200, while 166 + 32 = 198 leaves 1 px gap above the screen bottom.
+
+CD-root additions: `VGADICT.WL1` (1024 B), `VGAHEAD.WL1` (471 B), `VGAGRAPH.WL1` (326 KB). ISO grows from 1.19 MB to 1.46 MB.
+
+### Build + first test
+
+- Compile: clean, `W131: No prototype found for 'FB_Put'` warning (DrawFacePic calls FB_Put, defined later in file). Fixed in iter-1b with a one-line forward decl, mirror of the A.17 `DrawWeaponOverlay` pattern. Final: zero warnings.
+- Output: `build/WOLFA151.EXE` 230 KB, `build/wolfvis_a151.iso` 1.46 MB.
+- First MAME test: BJ face appears correctly on the HUD on first boot — full BJ Blazkowicz with blond hair, peach skin, blue eyes, expressive face. Loader / Huffman / deplane all worked first try after the recon.
+
+User verdict (post-test): face confirmed canonical, but reported a "vertical 1-px column of pixel bleed" through the centre of the viewport at certain cardinal player headings (E/N/W/S exact alignment), intermittent — sometimes visible, sometimes not.
+
+### Iter 2 — cardinal-angle DDA nudge fix
+
+Diagnosis: the centre column of the viewport (col == VIEW_W/2 = 64) has `half_fov_a = 0`, so `ra = g_pa` exactly. When `g_pa` is a multiple of 256 (cardinal: 0/256/512/768 in our 1024-unit angle domain), the cast ray runs exactly parallel to a tile-grid axis. The DDA ray traverser then traces along the grid line and reports a spurious near-zero hit at the next tile-corner glance, painting one bright wall column through the viewport vertical centre.
+
+Fix: nudge `ra` by 1 angle unit (~0.35°) when it would otherwise land exactly on a cardinal axis. One-line addition in the cast loop after the `ra` calculation:
+
+```c
+ra = (g_pa + half_fov_a) & ANGLE_MASK;
+if ((ra & 0xFF) == 0) ra = (ra + 1) & ANGLE_MASK;
+```
+
+The mask `0xFF` catches all four cardinal angles in one test (the upper bits of the 10-bit angle distinguish E vs N vs W vs S). The shift is below pixel resolution, visually imperceptible. Bonus: same fix benefits `FireHitscan` reliability since the hitscan reads `g_zbuffer[VIEW_W/2]` (which the cast loop populates).
+
+This is a **pre-existing A.13.1 raycaster artifact**, not introduced by A.15.1. It surfaced now because: (a) the BJ face on the HUD draws the eye to the centre of the screen, (b) gameplay since A.18 (firing) trains the player to align cardinal before shooting, (c) the user explicitly tested the HUD rather than running through corridors. Bundled into A.15.1's commit because the diagnosis-and-fix took 5 min and shipping it later as a standalone polish patch would clutter the milestone log.
+
+Rebuild + relaunch: user verdict "Tutto ok ora, A!" — fix confirmed.
+
+### Result
+
+Snapshots `snap/vis/0029.png` (face confirmed correct + bleed visible at cardinal heading, pre-fix) and `snap/vis/0030.png` (face correct, mid-combat with score=000200, ammo=01, no bleed at non-cardinal heading). Post-fix run not snapped (user closed MAME after visual verification).
+
+The HUD now reads as canonical Wolf3D: BJ face, real digit values, baked chrome panel, Wolf3D blue. The first thing a viewer sees on a new frame is "this is Wolf3D" rather than "this is a port-in-progress". Subjective polish gain that justified re-elevating A.15.1 from S15+.
+
+### Trap / Gotcha / Eureka (S14 A.15.1)
+
+- **Eureka S14.A151.E1 — `GFXV_WL1.H` enum offsets are NOT load-bearing for shipped shareware assets.** FACE1APIC is enumerated as chunk 113 in the build header but lives at chunk 121 on disk. The shipped WL1 was built with 8 extra interstitial pics (status icons) that the linker enum doesn't know about. Always verify chunk indices empirically (Python helper `reverse/decode_vgagraph.py` decompressed the pictable; its 144-entry expansion vs. the 136 in the header was the smoking gun). Pattern: any time a Wolf3D constant doesn't match what's on disk, assume the on-disk artifact is authoritative — the shareware DEICE pack and the original source build are not bit-identical.
+- **Eureka S14.A151.E2 — Recon-first now 8-for-8 single-iter zero-fix.** A.15.1 added a Huffman bit-stream expander + a 4-plane deplane + a 3-file orchestrated loader, all in one milestone. Built clean (one expected forward-decl warning fixed in 30 s), ran behaviorally correct first try. The Python recon helper paid off twice: (1) confirmed the empirical FACE1APIC chunk index, (2) gave us the expanded-length value (768) which the C-side asserts before HuffExpand to surface a corrupt VGAGRAPH gracefully. Pattern: when porting an asset format, write a Python decoder FIRST — it's faster to iterate, the bug-finding loop is tighter, and the C port becomes a transcription rather than a discovery.
+- **Eureka S14.A151.E3 — Cardinal-angle DDA nudge is a 1-line fix for a pre-existing artifact.** The bleed had probably existed since A.13 but was hidden by sprites / HUD / motion. The user-noticed report at A.15.1 (when the BJ face anchors the eye to the centre) was the surfacing event. Fix: `if ((ra & 0xFF) == 0) ra = (ra + 1) & ANGLE_MASK;`. Below-pixel shift, breaks the grid-line trap. Pattern: visual bugs that "always existed but only became visible now" are almost always edge-case math at exact symmetry — looking for clean geometric cases (cardinal angles, exact halves, zero offsets) localizes the cause faster than tracing a single pixel through the pipeline.
+- **Trap S14.A151.1 — Linker enum vs on-disk chunk count mismatch.** Caught at recon, not iter, by running the Python pictable decoder. Had we trusted the enum (`FACE1APIC = 113`), the loader would have read an 8×16 status icon and the deplane would have produced a garbled 24×32 with 1/8 of the bytes. Visually a "scrambled face" — would have looked like a Huffman bug, sending us down the wrong rabbit hole. Saved ~30-60 min by validating empirically first.
+- **Trap S14.A151.2 — `cd_root_a151` accidentally created as a file by `cp` before the directory existed.** When the Bash chain `mkdir -p ... cd_root_a151 && cp ... ...assets/VGADICT.WL1 ... cd_root_a151/` was issued in parallel-tool-call form (multiple Write + Bash in one block), the `cp` ran before `mkdir` and copied the source file to the destination as a single file named `cd_root_a151`. Subsequent commands all errored with "Not a directory". Fix: `rm cd_root_a151 && mkdir -p cd_root_a151 && ...` re-do. Lesson: when staging a new directory + content, do NOT issue the directory-creation in parallel with content-copies; ensure the `mkdir` completes first. Pattern caught and recovered in ~30 s, but worth flagging as a recurring Bash chain failure mode.
+- **Two iterations** (face load + bleed fix), both single-issue, both immediately resolved. The face load was zero-fix; the bleed was a polish patch on a pre-existing artifact, not an A.15.1 regression. So really 1 iter for the milestone proper + 1 polish bundle = clean.
+
+### Concrete results
+
+- New: `src/wolfvis_a151.c` (~3380 LOC, +~170 vs A.18), `src/build_wolfvis_a151.bat`, `src/link_wolfvis_a151.lnk`, `src/mkiso_a151.py`.
+- New: `cd_root_a151/` (12 files: A.18 set + VGADICT.WL1 + VGAHEAD.WL1 + VGAGRAPH.WL1 + WOLFA151.EXE + SYSTEM.INI updated `shell=a:\WOLFA151.EXE`).
+- New: `build/WOLFA151.EXE` (230 KB), `build/wolfvis_a151.iso` (1.46 MB).
+- New: `reverse/decode_vgagraph.py` (Python recon helper, decompresses the pictable + dumps face dimensions).
+- New: `snap/vis/0029.png` (face correct + bleed pre-fix), `snap/vis/0030.png` (face correct, mid-combat, no bleed at non-cardinal).
+- README: A.15.1 row added, quick-start updated to A.15.1.
+- Memory: `project_milestone_A151_face.md` (NEW), `reference_dda_cardinal_nudge.md` (NEW), `MEMORY.md` index updated, `project_S15_todo_opening.md` updated to remove the A.15.1 bullet (now closed).
+- Bonus polish: 1-line cardinal-angle DDA nudge bundled. Closes a pre-existing A.13.1 visual artifact.
+
+### Next-step candidates for Session 15
+
+Roadmap unchanged from the S14-A.18 wrap, minus A.15.1 (now closed):
+
+1. **PF finale + diagnostic** (S15 default). Split telemetry, 5 PIT-direct sub-counters, attack the actual measured bottleneck. Goal 4-5 → 8-10 FPS. Required prerequisite for gameplay-test of A.19. ~1.5-2 h.
+2. **A.19 — Pain flash + enemy firing back + player health** (S15 stretch IF PF target reached). Vanilla T_Chase shoot branch + SPR_GRD_SHOOT1..3 + g_health + HUD health re-blit + face-state machine driven by g_health (closes the A.15.1 deferral with the now-loaded VGAGRAPH faces). ~1.5-2 h.
+3. **A.19+ polish bundle**: SFX on fire (OPL3 chunks from VSWAP post-sprite range), HEALTHPIC/AMMOPIC small icons (more VGAGRAPH consumers), pickups (ammo/score drops on kill), boss optional.
+
+### S14 total wrap-up (A.18 + A.15.1)
+
+Two milestones in one session, three "iterations" total (A.18 single-iter zero-fix, A.15.1 single-iter zero-fix + 1 bleed-fix polish bundle). All technically clean: every compile cycle finished with zero or one fixable warning, every MAME launch worked, no chirality bugs / DGROUP overflows / Huffman misalignments. Recon-first now 8-for-8 on multi-subsystem milestones (A.13, A.14, A.14.1, A.16a, A.13.1, A.16b, A.18, A.15.1).
+
+Time invested: ~2.5 h real-time S14 (A.18 ~1 h + A.15.1 ~1 h + bleed fix ~10 min + wraps ~30 min). Right at the upper edge of the original "S14 1.5-2 h budget + stretch absorbing A.15.1" plan.
+
+Asset coverage: with A.15.1, the project now reads all 4 main Wolf3D asset formats — VSWAP (sprites/walls/sounds, A.4-A.10), AUDIO* (IMF music + scheduled-output audio chunks, A.10), GAMEMAPS+MAPHEAD (Carmack+RLEW maps, A.7), VGAGRAPH+VGAHEAD+VGADICT (chunked Huffman pics, A.15.1). The remaining shareware files (GAMEPAL.OBJ, AUDIODCT/HED for SFX) are minor or already covered. From this point forward, ANY visual asset id Software shipped in WL1 can be brought into the port with established patterns.
+
+User experience arc S14: open with "ci sta, seguiamo pure A" (default A.18 chosen) → A.18 closes gameplay loop → "sono piacevolmente sorpreso ... tutto liscio first try" (methodology compliment that triggered `feedback_recon_first_validated.md`) → "facciamo A.15.1 così validiamo l'hud" (stretch chosen, scope locked on HUD aesthetic) → "Volto OK confermato" + bleed report → quick-fix + "Tutto ok ora, A!". Single linear narrative arc, both milestones compounded a single visual feedback loop.
+
+Workflow rule re-confirmed (third time this S): code + VIS_sessions.md + README.md + memory in the same commit. A.18 and A.15.1 each got their own commit (two milestones, two commits), pushed sequentially.
+
+---
