@@ -35,6 +35,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.15.1 — Real BJ face on HUD | VGAGRAPH chunked Huffman loader (VGADICT + VGAHEAD + VGAGRAPH), HuffExpand + 4-plane → linear deplane, FACE1APIC chunk 121 (empirical, not enum 113), 24×32 baked into static_bg, fallback to placeholder on load fail. Bundled fix: cardinal-angle DDA nudge for centre-column wall bleed | ✅ |
 | A.19 — Centered viewport + minimap toggle (PF finale step 1) | `VIEW_X0` 0 → 96 (viewport horizontally centered), per-frame `DrawMinimapWithPlayer` removed (~25–30 ms/frame freed — H2 hot path captured), `VK_HC1_F1` (Xbox X) toggles a 64×64 centered minimap overlay, music F1/F3 debug bindings dropped (OPL/IMF infra dormant). User confirms "QUASI giocabile" — first PoC milestone where the gameplay framerate becomes usable for real navigation | ✅ |
 | A.19.1 — Sprite scaler Q.16 accumulator (PF finale step 2) | `DrawSpriteWorld` inner pixel loop converts per-pixel long division (`sy_src = (dy - dy_top) * 64L / sprite_h`) into a `step_q16 = (64 << 16) / sprite_h` step accumulator (sy_acc / srcx_acc) — same primitive as `DrawWallStripCol`. dy bounds pre-clipped once per post, framebuf access via decrementing `__far` pointer (no per-pixel multiplication). Eliminates the close-enemy freeze (sprite_h saturated at 4×VIEW_H = 512 was ~10 M cyc per sprite per frame → now ~250 k cyc). User: "il rallentamento con guardia vicina rimane, ma è meno bloccante rispetto a prima (nessun freeze, solo drop fps)" — H1 freeze closed; residual cost is linear pixel volume | ✅ |
+| A.19.2 — Micro-perf bundle (PF finale step 3) | `DrawWallStripCol` ceiling/wall/floor fills do WORD pair-writes (single aligned word store replaces two byte stores: ~6 cyc/pair → ~3 cyc/pair on 286). `DrawSpriteWorld` outer column loop pre-clips `dest_col` to viewport and seeds `srcx_acc` so off-viewport iterations are skipped entirely; inner bound check dropped. EXE 229,736 B (slightly smaller than A.19.1 — pair-write loops compile to fewer instructions). User verdict shifts "QUASI giocabile" → **"Giocabile"**, with residual close-quarter drop reframed by user as a non-realistic gameplay state ("le guardie sparano da lontano e un giocatore muore molto prima di raggiungerle da vicino"). Defensive: build batch now atomically copies EXE into `cd_root_a192/` to prevent the recurring "shell missing → PROGMAN.EXE error" trap | ✅ |
 
 ## Repository layout
 
@@ -69,14 +70,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a191.bat"    # produces build/WOLFA191.EXE
-python mkiso_a191.py                 # produces build/wolfvis_a191.iso
+cmd /c ".\build_wolfvis_a192.bat"    # produces build/WOLFA192.EXE + stages it in cd_root_a192/
+python mkiso_a192.py                 # produces build/wolfvis_a192.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a191.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a192.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

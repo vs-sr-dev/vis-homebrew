@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA192.EXE
+FILE          ..\build\wolfvis_a192.obj
+OPTION        MAP=..\build\WOLFA192.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.19.2 micro-perf bundle (WORD pair-write + dest_col pre-clip)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

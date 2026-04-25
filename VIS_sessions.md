@@ -2087,3 +2087,103 @@ Two milestones bundled in one session continuation, both single-iter zero-fix, t
 The user pacing pattern S15 worth recording: open with strategic deviation ("layout first not telemetry"), validate at each milestone with quick visual+perceptual feedback ("QUASI giocabile" / "no freeze, solo drop fps"), continue chaining as long as wins keep coming. Distinct from S14 pattern (one-milestone-per-session-then-stop) — the smaller per-milestone scope here (~30 min impl each) lets us bundle without fatigue.
 
 ---
+
+## Session 16 — 2026-04-25 — Milestone A.19.2 micro-perf bundle (PF finale step 3)
+
+### Scope
+
+S15 closed with two perf wins (A.19 layout, A.19.1 sprite scaler) and verdict "QUASI giocabile + no freeze, solo drop fps". S16 opening attack plan agreed by user: A.19.2 (small bundled wins, low risk) → A.21 EnterDVA (large bet, ~30-50% projected). This entry covers A.19.2; A.21 follows in this session.
+
+### Recon (~10 min)
+
+Three zones inspected in `wolfvis_a191.c`:
+
+1. **DrawSpriteWorld outer column loop** (line 2737-2791). The loop iterated `dest_col = dest_left .. dest_right` with `srcx_acc += step_q16` advancing every iter, and `if (dest_col < 0 || dest_col >= VIEW_W) continue;` skipping the actual rendering. For close sprites with `sprite_h = 4*VIEW_H = 512`, dest_left could be ~-200 and dest_right ~312, giving ~340 wasted iter per close sprite at ~2 cyc each = ~700 cyc/sprite/frame of pure outer-loop overhead. Fix: pre-clip `col_iter_start = max(dest_left, 0); col_iter_end = min(dest_right, VIEW_W)` and seed `srcx_acc = (col_iter_start - dest_left) * step_q16` so the first iter samples the same source column the unclipped code did. Drop the inner bound check entirely.
+
+2. **DrawWallStripCol ceiling/wall/floor fills** (line 2628-2660). All three fills do `*fb1 = c; *fb2 = c;` (two byte stores per pair, ~6 cyc/pair on 286). `VIEW_X0=96` even + half-col cast `step=2` keep `sx = VIEW_X0 + col` always even, so `(WORD __far *)fb1` is always word-aligned. Replace pair-byte with `*((WORD __far *)fbw) = pair_w;` (single aligned word store, ~3 cyc/pair). Decrement pointer by `SCR_W >> 1` (160 WORD units) per row.
+
+3. **Top-down DIB orientation flip**. The wrap-S15 candidate list claimed "~5-10 ms" for a `biHeight = -SCR_H` flip. Recon falsifies this: the `(SCR_H-1)-y` inversions in the codebase live exclusively in **per-primitive setup** (1× per DrawWallStripCol call, 1× per DrawSpriteWorld post — total ~20 setups per frame = ~60 cyc total saved). The hot inner loops use `fb -= SCR_W` (decrement) which would become `fb += SCR_W` (increment) — same cost. Conclusion: top-down DIB is mostly cosmetic, not perf. Defer indefinitely; not worth the cross-callsite refactor risk.
+
+### Implementation (~30 min)
+
+Single source file `src/wolfvis_a192.c` (~3500 LOC, +30 vs A.19.1). Two functions touched, both single-iter zero-fix.
+
+**DrawWallStripCol fills (3 loops touched):**
+
+```c
+/* Once per fill, per call: */
+fbw = (WORD __far *)(framebuf + (long)((SCR_H - 1) - top) * SCR_W + sx);
+
+/* Per row: */
+*fbw = CEIL_PAIR;            /* or FLOOR_PAIR, or pair_w for wall */
+fbw -= (SCR_W >> 1);
+```
+
+`CEIL_PAIR = (CEIL_COLOR << 8) | CEIL_COLOR`, ditto FLOOR. Wall fill computes `pair_w = (c << 8) | c` per row from the texture sample. Removed `BYTE __far *fb1; BYTE __far *fb2;` decls (now unused). Pointer arithmetic on `WORD __far *` advances by `sizeof(WORD)=2` per unit, so subtracting `SCR_W/2 = 160` matches the byte-pointer subtraction of `SCR_W` from the original.
+
+**DrawSpriteWorld outer loop:**
+
+```c
+/* A.19.2 once-per-sprite pre-clip: */
+col_iter_start = (dest_left  < 0)      ? 0      : dest_left;
+col_iter_end   = (dest_right > VIEW_W) ? VIEW_W : dest_right;
+if (col_iter_start >= col_iter_end) return;
+srcx_acc = (long)(col_iter_start - dest_left) * step_q16;
+
+for (dest_col = col_iter_start; dest_col < col_iter_end; dest_col++) {
+    srcx = (int)(srcx_acc >> 16);
+    srcx_acc += step_q16;
+    /* old bound check removed: dest_col now guaranteed in [0, VIEW_W) */
+    ...
+    sx = VIEW_X0 + dest_col;
+    /* old bound check removed: sx now guaranteed in [VIEW_X0, VIEW_X0+VIEW_W)
+     * = [96, 224) which is always inside [0, SCR_W=320) */
+    ...
+}
+```
+
+Window class `WolfVISa191` → `WolfVISa192`.
+
+### Build
+
+- Compile + link: clean, single-iteration zero-fix. `WOLFA192.EXE` 229,736 B (slightly **smaller** than A.19.1's 230,160 — pair-write loops compile to fewer instructions: 1 store vs 2, no `fb2` aux pointer).
+- ISO build: 1.46 MB.
+- **Trap S16.A.19.2.1 — missing EXE in cd_root**. First MAME launch failed with "Errore di lancio PROGMAN.EXE". Investigation: cd_root_a192 was cloned from cd_root_a191, the old WOLFA191.EXE removed, but **WOLFA192.EXE never copied over**. ISO size delta confirmed (1.30 MB vs expected 1.46 MB = 165 KB short = the EXE size). MW couldn't find the configured shell, fell back to PROGMAN.EXE which isn't on the disc → error dialog. Fix: copy EXE + rebuild ISO. Defensive update: appended `copy /y ..\build\WOLFA192.EXE ..\cd_root_a192\WOLFA192.EXE` to `build_wolfvis_a192.bat` so subsequent rebuilds stage the EXE atomically. Should be the template for all future `build_*.bat` scripts. **Recurring cd_root staging trap should be added to memory.**
+
+### Result
+
+User test verdict: "Giocabile a meno che proprio la guardia non sia letteralmente addosso al giocatore - in quel caso cala. Ma onestamente: è un edge case che in W3D vero non capiterà: le guardie sparano da lontano e un giocatore muore molto prima di raggiungerle da vicino se non spara anche lui."
+
+Two confirmations:
+
+1. **Verdict shift "QUASI giocabile" → "Giocabile"**. The threshold the player crosses for actually-playable framerate. Headline of the milestone.
+2. **Reframing of residual close-quarter cost.** User self-resolves the H1 residual by observing it's a non-realistic gameplay state — vanilla Wolf3D guards engage at range, the player dies before reaching melee distance silently. Pattern: a perf cost that only manifests in non-realistic state is acceptable; do not invest further optimization there. **Distinct from "fix the bug" / "ship it as-is" — this is "the cost is gated by a gameplay scenario that doesn't occur in normal play".**
+
+### Trap / Gotcha / Eureka (S16.A.19.2)
+
+- **Eureka S16.A.19.2.E1 — recon falsifies wrap candidate.** S15 wrap proposed "top-down DIB ~5-10 ms" as one of the A.19.2 sub-wins. Recon showed the inversion is in setup, not hot-path → real saving ~60 cyc/frame, marginal. Falsifying a wrap-list claim with 5 min of grep+read saved a multi-hour cross-callsite refactor with regression risk. **Pattern: wrap-list candidates are forecast, not commitment. Always recon-before-implement.**
+- **Eureka S16.A.19.2.E2 — "edge-case-only cost is not a perf bug, it's a gameplay state filter".** User reframing: optimization scope should be "what costs exist during plausible play". Adjacent-tile melee against an active guard isn't plausible because guards shoot at distance and player health drains before contact. Future scope decisions for this project should ask "in what game state does this cost manifest?" before investing optimization budget. Cross-pipeline applicability: any gameplay system where state-space is constrained by mechanics, not by player will.
+- **Trap S16.A.19.2.1 — cd_root_<ver>/ EXE staging recurring**. See Build section above. The cd_root clone-then-purge-then-add workflow is fragile; the build batch should always atomically copy the new EXE in. Now codified in `build_wolfvis_a192.bat`.
+- **Recon-first now 11-for-11** on multi-subsystem milestones. Streak unbroken from A.13 / A.14 / A.14.1 / A.16a / A.13.1 / A.16b / A.18 / A.15.1 / A.19 / A.19.1 / A.19.2.
+
+### Perf delta
+
+- Before A.19.2: ordinary scenes ~6-7 FPS, close enemies ~3-4 FPS (no freeze post-A.19.1 but perceptible).
+- After A.19.2: ordinary scenes estimated ~7-8 FPS (+10-15% from pair-write across visible columns), close enemies ~5-6 FPS (+30-40% from dest_col pre-clip + pair-write + dead bound check removal).
+- User verdict shift "QUASI giocabile" → "Giocabile". Both edges of the framerate window improved.
+
+### Time invested
+
+~45 min real-time S16 (recon 10 min + impl 20 min + build/test/wrap 15 min including the trap S16.A.19.2.1 fix). Single iter on the code, one extra iter on the ISO due to EXE staging miss.
+
+### Next-step candidates for S16 cont.
+
+Updated priority list (post-A.19.2):
+
+1. **A.21 — EnterDVA direct A000:0000 framebuffer.** Largest remaining single bet, projected 30-50% on top of all current micro-wins. Recon partially done in S15 (programmer's_ref.txt:3066-3139). ~1.5-2 h. Headline candidate for S16 cont.
+2. **A.19.3 — Split telemetry**. 5 PIT-direct sub-counters (cast / wall / sprite / overlay / paint). Now **highly informative** because all named bottlenecks (H1 sprite divisor, H2 minimap, A.19.2 store path) are closed → next iteration finds new bottlenecks blindly. ~30-45 min. Could go either before or after A.21.
+3. **A.20 — Enemy firing back + player health**. Gameplay loop closure. Now testable in close quarters but per user the close-quarter case is not realistic anyway — guards engage at range. ~1.5-2 h.
+
+S16 plan B-leg already agreed: proceed to A.21 EnterDVA recon + impl.
+
+---
