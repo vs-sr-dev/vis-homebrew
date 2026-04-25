@@ -29,6 +29,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.15 — HUD | Wolf3D-style status bar with 7 panels + 4×6 digit font + face placeholder | ✅ |
 | A.16a — Static enemies | Guard billboards (108..115 + 144..151 + 180..187) + 8-direction CalcRotate via atan2 LUT | ✅ |
 | A.13.1 — Raycaster polish | Grid-line DDA + Tier-3 wall variety (32 pages, side-aware light/dark) + Watcom `-ox` discovery + time-scaled door anim + tight inner loops + partial-src StretchDIBits | ✅ |
+| A.16b — Enemy AI ticker | State machine (Stand/Walk) + 32 walking frames + LOS Bresenham + 8-dir snap chase + sub-tile movement + per-axis collision + time-scaled phase advance | ✅ |
 
 ## Repository layout
 
@@ -63,14 +64,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a13_1.bat"   # produces build/WOLFA131.EXE
-python mkiso_a13_1.py                # produces build/wolfvis_a13_1.iso
+cmd /c ".\build_wolfvis_a16b.bat"    # produces build/WOLFA16B.EXE
+python mkiso_a16b.py                 # produces build/wolfvis_a16b.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a13_1.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a16b.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

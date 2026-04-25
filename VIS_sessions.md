@@ -1584,3 +1584,74 @@ Bonus discoveries: (1) Watcom `-ox -s` is project-wide retrofit lever — every 
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md + memory in the same commit. One commit for S12 close (the four iterations are logically one bundle, no cherry-pickable midpoints).
 
 ---
+
+## Session 13 — 2026-04-25 — Milestone A.16b enemy AI ticker
+
+### Scope
+
+Single milestone, single iteration. Stand → Walk state machine for guard enemies, LOS-aware chase, sub-tile movement, collision against walls + closed doors. PoC-grade: no firing (deferred to A.18), no pain/die (no damage system yet), no patrol/path (vanilla T_Path skipped — guards are dormant until they sight the player). Scope inherited verbatim from the S13 opening TODO.
+
+### Recon (~10 min)
+
+Pre-coding pass over Wolf3D shareware source — the recon-first pattern is now five-for-five on multi-subsystem milestones (A.13, A.14, A.14.1, A.16a, A.13.1).
+
+- **Sprite enum (WL_DEF.H:159-208)**: confirmed walking-frame chunks `SPR_GRD_W1_1..W4_8` are consecutive `58..89` (32 frames, 4 phases × 8 directions). Pain/die/dead at `90..95`, shoot at `96..98` — explicitly out of scope.
+- **State engine (WL_STATE.C:113-117 NewState)**: vanilla pattern is `state = state->next` when ticcount → 0; think + action callbacks invoked separately. Our PoC fuses think + render-driver, runs all per-tick logic inside one ticker.
+- **Guard state defs (WL_ACT2.C:418-444)**: `s_grdstand` calls `T_Stand` = `SightPlayer` only. `s_grdpath1..4` calls `T_Path`, `s_grdchase1..4` calls `T_Chase`. Tic durations (path 20+5+15+20+5+15) gave us the timing target: ~1 s W1→W4 cycle ≈ 250 ms per phase.
+- **`T_Chase` (WL_ACT2.C:3069)**: shoots player when `CheckLine` passes + RNG, else moves toward player. Our PoC drops the shoot branch entirely; movement is direct via 8-dir snap from `atan2(player - enemy)`.
+- **`CheckLine` (WL_STATE.C:1037)**: vanilla LOS via 1/256-tile precision DDA, doors-aware (intercept-vs-doorposition test). PoC simplification: tile-grid Bresenham, doors block when `g_door_amt < DOOR_BLOCK_AMT` (mirror of `IsBlockingForMove`). Door-aperture-aware LOS deferred to A.18 alongside hitscan.
+
+### Implementation
+
+Single source file `src/wolfvis_a16b.c` (~1690 LOC, +160 vs A.13.1). Five plumbing changes, all additive:
+
+- **Sparse VSWAP table extended**: `sprite_chunk_offs[]` grows from 26 to 58 entries. Slots 26..57 map to VSWAP chunks 58..89 (phase-major: slot 26..33 = W1, 34..41 = W2, 42..49 = W3, 50..57 = W4). Loader (one-line bump `NUM_SPRITES 26 → 58`) loads them with the same `_lread`/`_llseek` path used since A.4.
+- **`Object` struct extension**: added `long x_q88, y_q88` (sub-tile position in Q24.8), `BYTE state, state_phase`, `DWORD state_tick_last`. The painter sort + `DrawSpriteWorld` were refactored to read `x_q88/y_q88` directly instead of recomputing tile-center; static decorations seed these fields with `(tile_x<<8)|0x80`.
+- **`LOSCheck(ex, ey, px, py)`**: tile-grid Bresenham walker. `IsWall` and partially-closed `IsDoor` block. End tile (player) is implicit. `safety = MAP_W + MAP_H` guards against infinite loops on degenerate inputs.
+- **`AdvanceEnemies()`**: time-scaled ticker mirroring `AdvanceDoors`. `GetTickCount` delta drives both phase advance (`ENEMY_PHASE_MS = 250`) and movement step (`ENEMY_SPEED_Q88 = 128` Q8.8/sec ≈ 0.5 tile/sec). Per-enemy state machine: same-tile-or-LOS-fail → STAND, else WALK with snapped `enemy_dir`. Per-axis collision check (`IsBlockingForMove(ntx, ety)` then `IsBlockingForMove(tx, nty)`) so a guard sliding along a wall doesn't stop at the corner.
+- **Snap-to-8-dir**: `ord_to_dirtype[]` LUT folds the Q10 angle ordinal `((ang+64)>>7)&7` (CW from east) back into the vanilla Wolf3D dirtype convention `{E=0, NE=1, N=2, NW=3, W=4, SW=5, S=6, SE=7}` already used by A.16a's rotation code. `enemy_dx_q8[]/dy_q8[]` is the per-dirtype unit vector in Q0.8, with diagonals scaled by `181/256 ≈ 1/√2` so guards moving NE don't outpace guards moving N.
+- **`DrawAllSprites` sprite picker**: state-aware. STAND uses the existing `GUARD_S_FIRST_SLOT + sector` (= slots 18..25). WALK uses `GUARD_W_FIRST_SLOT + (state_phase << 3) + sector` (= slots 26..57). The atan2-based rotation math is reused unchanged from A.16a — the chirality fix `(facing - e2p_angle + 1024 + 64)` ported verbatim.
+- **WM_TIMER wiring**: one-line addition after `AdvanceDoors()` in the existing message-pump tick.
+
+### Build
+
+- Compile + link: clean, zero-iteration. `WOLFA16B.EXE` 251 KB (was 248 KB for A.13.1, +3 KB for AI code + LUTs + extended struct).
+- ISO: `build/wolfvis_a16b.iso` 1.19 MB. `cd_root_a16b/` cloned from `cd_root_a13_1/` with `WOLFA16B.EXE` and `SYSTEM.INI` `shell=` pointing at the new EXE.
+
+### Result
+
+Snapshot `snap/vis/0022.png`: a guard standing inches from the camera, frontal pose (correct sector pick on melee approach), HUD chrome intact, minimap showing player + remaining enemies.
+
+User test verdict: *"tutto perfetto :D che ansia anche, ora si avvicinano e quando sono davanti a te stanno ferme a fissarti, praticamente è un horror in questa fase"*. The "horror stare" is exactly the PoC behavior contract: chase fires when LOS+range pass, guards advance, then `STAND` re-engages when they reach an adjacent tile (no firing means they just face you and breathe). Vanilla `T_Chase` would have transitioned to `s_grdshoot1` in the RNG branch — A.18 closes that loop.
+
+### Trap / Gotcha / Eureka (S13)
+
+- **Eureka S13.E1 — recon-first now 5-for-5 on multi-subsystem milestones.** A.16b touched VSWAP loader, BSS layout, Object struct, ScanObjects, DrawAllSprites picker, AdvanceEnemies + LOSCheck (new modules), and WM_TIMER hook. Built clean + ran behaviorally correct first try. Time invested in pre-coding recon (~10 min) keeps paying off vs. the cost of an iteration cycle (~5-10 min compile + ISO + MAME boot + read result).
+- **Eureka S13.E2 — Q8.8 sub-tile pos as the painter-sort + collision substrate is the right primitive.** Replacing `tile_x/tile_y` lookups in painter sort + DrawSpriteWorld with direct `x_q88/y_q88` reads eliminated the per-frame `((long)tile<<8)|0x80` recompute (small win) and made the moving-enemy code drop in trivially (big win). For A.18 hitscan, world-space `x_q88/y_q88` is already the format the player ray needs; no further refactor needed.
+- **No Trap S13.x** — uneventful single-iteration milestone. Build batch absolute-path invocation worked first try (S12 trap memory paid off via PowerShell tool over Bash `cmd //c` pattern). Object struct grew without DGROUP issues (`__far Object[128]` of 22 bytes ≈ 2.8 KB, well under 64 KB).
+- **Behavior PoC vs. canonical Wolf3D**: our `AdvanceEnemies` is a fused `T_Stand + T_Chase` loop — no reaction-delay model (vanilla `SightPlayer` rolls `temp2 = 1 + US_RndT()/4` for guards), no path/patrol behavior (`T_Path` deferred), no shoot-on-LOS-RNG (deferred to A.18). The "horror stare" is a direct artifact of skipping the shoot transition. This is the right PoC scope: gameplay loop closes only when firing exists, so we wait until A.18 to taste real combat.
+
+### Concrete results
+
+- New: `src/wolfvis_a16b.c` (~1690 LOC), `src/build_wolfvis_a16b.bat`, `src/link_wolfvis_a16b.lnk`, `src/mkiso_a16b.py`. Sin/atan tables `wolfvis_a13_1_sintab.h` / `wolfvis_a13_1_atantab.h` reused unchanged.
+- New: `cd_root_a16b/` (9 files: A.13.1 set with `WOLFA16B.EXE` + `SYSTEM.INI` updated `shell=a:\WOLFA16B.EXE`).
+- New: `build/WOLFA16B.EXE` (251 KB), `build/wolfvis_a16b.iso` (1.19 MB).
+- New: `snap/vis/0022.png` (guard in melee range, frontal pose, minimap intact).
+- README: A.16b row added.
+- Memory: `project_milestone_A16b_ai.md` (NEW), `MEMORY.md` index updated, `project_S13_todo_opening.md` retired in favor of S14 opening.
+
+### Next-step candidates for Session 14
+
+1. **A.17 — Weapon overlay** (~1 h). Gun sprite at bottom-center + PRIMARY animation cycle, no firing yet. Visual milestone, low complexity. Could fit at the tail of S13 if momentum holds, otherwise S14 head.
+2. **A.18 — Firing + hitscan + damage** (~1.5-2 h). Hitscan ray from player center, first-hit (wall vs. enemy via z-buffer scan), damage application + ammo decrement + score increment. PRIMARY rebind door→fire, door toggle moved to SECONDARY. HUD finally driven by real state. Closes the "horror stare" gap.
+3. **A.15.1 — Real BJ face from VGAGRAPH** (~1-1.5 h). Lower priority (placeholder works).
+
+S13 wrap recommendation: **A.18 directly in S14**. A.17 weapon overlay is a 1-hour visual prelude — could absorb into S14 as warm-up before A.18. PF finale + light-by-distance still deferred to post-L1.
+
+### S13 wrap-up
+
+Single iteration, zero fixes. The recon pass took 10 minutes; the implementation took 45 minutes; build + MAME test + user verification took 5 minutes. ~1 hour total real-time vs. the 1.5-2 h S13 budget — under-budget enough to optionally absorb A.17 in the same session if user direction holds.
+
+The "horror stare" gameplay artifact is the cleanest possible signal that the AI loop closes correctly: enemies see the player → walk to him → reach melee range → stand. Adding firing in A.18 will turn the same loop into actual combat without changing any of the A.16b plumbing.
+
+---
