@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA12.EXE
+FILE          ..\build\wolfvis_a12.obj
+OPTION        MAP=..\build\WOLFA12.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.12 sprite scaler (per-column post-walk fixed-point)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

@@ -796,3 +796,74 @@ Two milestones in one session: **A.11 (integrated scene)** clean first-attempt s
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md updated together in the same commit (regola consolidated since S5).
 
 ---
+
+## Session 7 — 2026-04-25 — Milestone A.12 (sprite scaler)
+
+**Scope:** port a sprite scaler over the existing A.5 t_compshape pipeline. This is the last subsystem before the raycaster (A.13). Per the "raycaster gentle" rule, A.12 is the natural warm-up — the column-by-column post-walk pattern is exactly what the raycaster needs for wall-strip rendering. User confirmed the scope at session open ("procedi"); A.10.1 left in its partial state from S6 (audio polish reopens only before showcase).
+
+### Design choice — chunky 2D scaler, NOT the original Wolf3D JIT path
+
+`WOLFSRC/OLDSCALE.C` ships two scalers: `ScaleShape` (clipped) and `SimpleScaleShape` (no clipping). Both are *compiled scalers* — `BuildCompScale` JITs x86 machine code into a per-height buffer, then `ScaleLine` calls into the compiled code with EGA/VGA SC_MAPMASK port writes and write-mode 2 plane manipulation. **Completely irrelevant to our chunky 320×200×8 framebuf model.** No plane masks, no GC_MODE, no compiled buffers — we already write one byte per pixel into a flat array.
+
+Two viable approaches for our model:
+
+1. **Decompress sprite to 64×64 chunky + 2D bilinear scale.** Simpler code, but needs ~12 KB additional BSS (3 sprites × 4 KB) and the inner loop is two separate scales (x and y) without any structural similarity to what the raycaster needs.
+2. **Per-column post-walk fixed-point scaler over the existing t_compshape.** Same data layout `DrawSprite` already consumes; for each destination column dx, compute `srcx = (dx - dest_left) * 64 / scale`, walk the post triples for that source column, map each `(starty..endy)` source range onto a destination range via the same fixed-point ratio, write one pixel per destination row.
+
+Picked (2). The function's column-walk shape is the seed for the raycaster wall-strip renderer in A.13 (raycaster gives a per-column wall height; for each column we draw a strip of texture pixels at that height — same scaling math, different source). Zero additional memory. The two long divisions per pixel inside the inner loop are not free on a 286 but they're amortized over single-sprite scale; for the raycaster we'll precompute step deltas to amortize them across columns.
+
+### Implementation
+
+`src/wolfvis_a12.c` (~770 LOC) is a clone of `wolfvis_a11.c` plus:
+
+- **`DrawSpriteScaled(int xc, int yc_top, int idx, int scale_h)`** — square dest, side = `scale_h` pixels. Centered horizontally on `xc`, top-anchored at `yc_top`. Walks `dataofs[srcx - leftpix]` to find each column's post list, then for each post `(endy*2, corr_top, starty*2)` maps to `[dy_start, dy_end)` and writes pixels with bottom-up DIB y-flip (same as A.5 `DrawSprite`). Inner loop clamps `sy_src` to `[starty_src, endy_src - 1]` to guard against integer round-up at segment boundaries (which would feed a wrong `corr_top + sy_src` and write the next post's first pixel to the previous post's last row).
+- **`ScaleRect(RECT *r, xc, yc_top, scale_h)`** — bbox helper for invalidate/restore math.
+- **A.12 state**: `g_scale = 64` (initial 1:1), `g_scale_xc = 157`, `g_scale_yc = 105`, `g_scale_prev_rc = {125,105,189,169}`. Bounds `SCALE_MIN=16`, `SCALE_MAX=160`, step 8.
+- **Layout change**: center sprite slot (idx 1, DeathCam) is now *dynamic*. `SetupStaticBg` only draws sides (idx 0 Demo at x=15, idx 2 STAT_0 at x=235). The center sprite is rendered after `SetupStaticBg` in `WinMain`, and re-rendered on every `WM_KEYDOWN` so it stays in sync with `g_scale`.
+- **WM_KEYDOWN unified erase/redraw**: prev rect of cursor + prev rect of scaled sprite both restored from `static_bg`, then both re-drawn at current state, then a single `InvalidateRect` over the union of all four rects (cursor prev/curr + scale prev/curr). Cursor is drawn after the sprite so it can ride on top.
+- **A/B remap**: `VK_HC1_PRIMARY` now does `g_scale += 8` (clamp 160) plus the A.11 high click tone; `VK_HC1_SECONDARY` does `g_scale -= 8` (clamp 16) plus the A.11 mid click + key-off. Click feedback retained — both effects coexist (scaler is visual, OPL ch0 click is audio).
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a12.obj wolfvis_a12.c` — clean, no warnings.
+- Link: `wlink @link_wolfvis_a12.lnk` — same `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` as A.11.
+- Output: `build/WOLFA12.EXE` (197 KB; +1 KB vs A.11, just `DrawSpriteScaled` + `ScaleRect`).
+- ISO: `build/wolfvis_a12.iso` (1.16 MB). `cd_root_a12/` is the A.11 file set with `WOLFA12.EXE` and `SYSTEM.INI` updated to `shell=a:\WOLFA12.EXE`.
+
+### Result
+
+First-attempt success in MAME 0.287 vis (after the launch-command false-start; see Trap S7.1). Three snapshots in `snap/vis/0000.png` (~150 px), `0001.png` (~100 px), `0002.png` (~50 px) — the DeathCam sprite at three different scales, side sprites unchanged 1:1 as size reference, walls / minimap / debug bar / cursor all intact. Zero ghosting. Zero observable regression on any A.11 subsystem.
+
+User confirmation: "Confermo tutto funzionante."
+
+### Trap / Gotcha / Eureka (S7)
+
+- **Trap S7.1 — MAME launch command must include `-rompath .`.** First launch attempt used `mame vis -cdrom ... -window -resolution 640x480 -nofilter -snapshot_directory snap` and crashed pre-VIS-logo. Without `-rompath .` MAME can't find `vis.zip` (the BIOS rom set in project root) and exits before the driver finishes initializing — manifests as a window that closes immediately. The canonical command from `README.md` is `mame -rompath . vis -cdrom build/wolfvis_aXX.iso -window -nomax -skip_gameinfo`. Lesson: never improvise MAME flags when the project README documents a working command — copy verbatim. (`-rompath .` is the single non-optional bit; `-window -nomax -skip_gameinfo` are ergonomic.)
+- **Eureka S7.E1 — Per-column post-walk scaler is the right shape for both sprites and raycaster walls.** The Wolf3D source ships the JIT compiled-scaler approach because in 1992 on a 386 in EGA/VGA planar mode, runtime-emitted `mov al,[si+N] ; mov es:[di+M],al` sequences eliminated all loop overhead. In our 8bpp chunky model with two long divisions per pixel, the per-column shape is *cleaner* than the 2D decompress-and-scale alternative AND directly maps to "for each ray column, draw a wall-strip of N texture pixels at scaled height." A.13 will be a remarkably small delta from this code — same column loop, source pixels come from a wall texture column instead of a sprite post chain.
+- **Eureka S7.E2 — RestoreFromBg-then-redraw works for two independent dynamic layers.** A.9 introduced `static_bg` for cursor erase. A.12 stresses it with a *second* dynamic layer (the scaled sprite) whose bbox can change every keypress. Because `static_bg` contains neither the cursor nor the scaled sprite, the two restores are commutative; we can erase both, then redraw both, with no ordering hazard. The pattern generalizes: for the raycaster, the entire 3D viewport will be a single dynamic layer over a static HUD background — same primitive, larger rect.
+- **Eureka S7.E3 — Sub-pixel rounding at segment boundaries needs an inline clamp.** Inside the inner dy loop, `sy_src = (dy - yc_top) * 64 / scale_h` was occasionally rounding to `endy_src` (one past the post's last source row) when `dy = dy_end - 1` and `scale_h` was non-power-of-2 (e.g., scale=72). Without the `if (sy_src >= endy_src) sy_src = endy_src - 1` guard, the function would index into the next post's first source row using the *current* post's `corr_top`, painting a single wrong-color pixel at the bottom of each segment. Caught during code review before the first build — so the artifact never appeared in MAME, but the guard stays. Lesson: when both dy_start and dy_end are computed by the same `*scale_h/64` formula, the inverse computed inside the loop can land outside the inclusive-exclusive range.
+
+### Concrete results
+
+- New: `src/wolfvis_a12.c` (~770 LOC), `src/link_wolfvis_a12.lnk`, `src/build_wolfvis_a12.bat`, `src/mkiso_a12.py`.
+- New: `cd_root_a12/` (9 files: A.11 set + WOLFA12.EXE, SYSTEM.INI updated).
+- New: `build/WOLFA12.EXE` (197 KB), `build/wolfvis_a12.iso` (1.16 MB).
+- New: `snap/vis/0000.png`, `0001.png`, `0002.png` (DeathCam at three scales, in `<project-root>/snap/` because we launched MAME from project root this time — see S6.1 gotcha).
+- README status table: A.12 ✅, A.13 marked 🚧 next. Quick-start build/launch commands updated to reference A.12 binaries.
+
+### Next-step candidates for Session 8
+
+1. **A.13 — Raycaster.** All foundation present and proven (palette, walls, sprites, scaler, framebuf, input, audio, perf, integrated scene). `WL_DRAW.C` port over the existing primitives. Per the column-walk eureka above, the scaler from A.12 is essentially the wall-strip renderer with a different source. Estimated 2–3 h.
+2. **A.10.1 reopen.** Only if the IMF "stacchi" become user-blocking for the showcase of the playable PoC. Start from hypothesis E (test other music chunks 263, 268, 285).
+3. **HUD / status bar.** BJ face, ammo, score — would build on A.5 sprite blits and a tiny number-rendering routine. Cosmetic relative to the raycaster.
+4. **`hcControl HC_SET_KEYMAP`**. Remap `VK_HC1_*` to standard `VK_*` for ergonomic switch-cases. Cosmetic.
+
+S7 wrap recommendation: go straight to A.13. The scaler closes the last subsystem prerequisite; everything else is now polish or post-PoC.
+
+### S7 wrap-up
+
+Single milestone, single sitting, first-attempt build success after one launch-command false-start. The "raycaster gentle" rule's prediction held: with the scaler in place, A.13 is no longer a structural unknown — it's a data-source swap (wall texture column instead of sprite post chain) over an already-proven column-walk renderer. The Wolf3D PoC's remaining work has now been narrowed to a single new subsystem (the cast itself) plus polish. Pacing was tight (~30 min real-time on A.12 from "procedi" to "confermato"), well inside the budget that the calibration memo predicts for ~1 h estimates.
+
+Workflow rule re-confirmed once more: code + VIS_sessions.md + README.md in the same commit.
+
+---
