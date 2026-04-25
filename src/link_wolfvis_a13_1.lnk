@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA131.EXE
+FILE          ..\build\wolfvis_a13_1.obj
+OPTION        MAP=..\build\WOLFA131.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.13.1 raycaster polish (grid-line DDA + light/dark walls)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS

@@ -1463,3 +1463,124 @@ Bonus discoveries: (1) the wall-texture modulo regression — pre-existing, surf
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Two commits in S11 (iter-1 dry-run could have been a separate commit but was rolled into the S11 close commit since iter-2 was minor and the milestone reads as one atomic deliverable in retrospect).
 
 ---
+
+## Session 12 — 2026-04-25 — Milestone A.13.1 (raycaster polish bundle)
+
+**Scope:** the perf-as-interaction-blocker fired in S11 ("4-5 FPS makes any enemy/weapon validation tedious") forced a polish pass on the raycaster + walls before any A.16b/A.18 gameplay work. Bundled deliverables: (a) grid-line DDA replacing step-by-fraction, (b) Tier-3 wall variety (32 pages, side-aware light/dark), (c) Watcom optimization-flag retrofit, (d) inner-loop micro-opt + half-col cast, (e) time-scaled door animation. Light-by-distance (originally Fase 3) deferred — would have eroded the perf gain just earned.
+
+User opening: "iniziamo decisamente da 1+2. Per il resto usa pure best judgment, un recon non fa mai male". Pre-coding recon on `WL_DRAW.C` confirmed the canonical wall-side mapping (`vertwall[i]=(i-1)*2+1` dark = X-side ray hit; `horizwall[i]=(i-1)*2` light = Y-side ray hit) before any code change.
+
+### Iter 1 — grid-line DDA + Tier-3 walls (~45 min, zero-fix)
+
+`wolfvis_a13_1.c` cloned from `wolfvis_a16a.c` (~1500 LOC base).
+
+**Grid-line DDA in CastRay.** Replaced the 1/16-tile sub-step DDA (max 1024 sub-steps per ray) with the canonical Wolf3D / Lode-tutorial pattern:
+
+- `deltadist_x_q88 = (1<<23) / |cos_q15|` (and similar for Y) — Q8.8 distance per X-tile crossing. Capped at `0x00FFFFFF` for near-axis-aligned rays where the other axis dominates.
+- `side_dist_x_q88` initialized to distance from origin to the FIRST X-grid line in ray direction, computed from `g_px & 0xFF` fractional + step direction.
+- Loop pick `min(side_dist_x, side_dist_y)`, advance by `+= deltadist` on that axis, step exactly 1 tile. Each iteration moves to a new tile (vs old ~16 sub-steps per tile).
+- Texture x: at hit, project ray to perp world coord (`hit_pos_y_q88 = g_py + perp_dist*dy/32767`), take fractional × 64.
+- Door branch fires once per door-tile entry (vs every sub-step in old DDA). Slab-plane crossing test reuses the A.14.1 math; computes slab distance via `(abs_axis_diff * 32767) / abs_dir` then verifies perp-coord stays inside tile and is past the open extent.
+
+**Tier-3 walls.** `WALL_COUNT` 8 → 32 (16 walls × {light, dark}). `walls[]` migrated `__far` → `__huge` (128 KB > 64 KB segment cap, mirror sprites pattern from A.14). `TileToWallTex(tile, side)` now returns `((tile-1)*2 + (side==X_SIDE ? 1 : 0)) % 32`. The pre-A.4 Hitler-poster collapse is closed: every distinct tile_id in 1..16 gets a distinct light/dark pair; tiles 17..63 wrap-modulo with valid pairs. `DOOR_TEX_IDX` sentinel updated 8 → 32.
+
+**LoadVSwap** unchanged structurally — already loops `i < WALL_COUNT` and uses `walls[i]`. Loading 32 chunks instead of 8 at startup is a one-time cost (~1.5 s extra at ISO load; user-imperceptible). EXE went 281 KB (A.16a) → 248 KB (A.13.1, due to `-ox` later).
+
+**Build.** First-try clean compile + link + ISO + MAME launch. Snapshot `0021.png` showed the Wolf3D blue-stone E1L1 walls with side-aware light/dark visible at corridor corners. User v1: "I wall sono PERFETTI. Ora sono blu com'è giusto che sia nel primo livello di W3D!" — ironic discovery: the user thought the walls had always been gray-stone, but vanilla Wolf3D E1L1 is blue-stone. The Hitler-monopoly bug had been hiding the level designer's intended wall id 1 (= ELITE_BLUE_STONE) since A.4.
+
+### Iter 2 — perf reckoning: -ox is THE missing flag
+
+Same iter-1 build: user v1.b — "Perf però purtroppo completamente invariato rispetto a prima". Per memory `feedback_pacing_calibration.md` ("non proporre arrendersi prima di ~2h reali"), did NOT capitulate; investigated.
+
+Build batch `wcc -zq -bt=windows -ml -fo=...` had **NO optimization flag**. Watcom default = `-od` (debug-style codegen, stack-spill per statement). 16 milestones from A.1 to A.16a all compiled unoptimized. Algorithmic perf wins (column-walk renderer, fixed-point math, LUTs, painter sort, grid-line DDA) were each individually compiled into bloated code.
+
+Added `-ox -s` (aggressive opt + drop stack-overflow checks). Rebuild + rerun: user verdict "siamo intorno ai 4 FPS — TECNICAMENTE è quasi un raddoppio delle prestazioni se ci pensi". 2-3 → 4 FPS = +50-100% perceptible perf, **zero source change**.
+
+Captured in `reference_watcom_optimization_flags.md`. Going-forward rule: every new `build_wolfvis_*.bat` MUST include `-ox -s`.
+
+### Iter 3 — half-col cast + tight inner loop (+1 FPS)
+
+Pushed further. Two changes bundled:
+
+1. **Half-col cast in `DrawViewport`.** Outer loop step=2; cast 64 rays instead of 128. `DrawWallStripCol` now writes pairs of adjacent columns (col, col+1) with the same wall_h / texture / depth. Cast cost halves; per-col bookkeeping (wall_h_long divide, sy_step divide, texture pointer setup) halves. Pixel write count is identical. Visual cost: walls show 2-px horizontal stairsteps, invisible at the 128-wide viewport with 64-px texture source.
+2. **Tight inner loop in `DrawWallStripCol`.** Pre-clip `dy` ranges once (no per-pixel bound checks); pointer-decrement framebuf access (no per-pixel `fb_y * SCR_W + sx` mul); paired writes via two parallel `BYTE __far *fb1, *fb2` decrementing pointers.
+
+Build + rerun: 4 → 5 FPS. Modest. Diminishing returns clearly setting in.
+
+### Iter 4 — door anim time-scale + partial-src StretchDIBits
+
+User flagged: "porte: troppi frame di apertura, letteralmente 10 secondi". Root cause: `WM_TIMER` cadence (50 ms) gets throttled by render time (~200 ms per frame), so `AdvanceDoors` actually fires only ~5x/sec, and `DOOR_STEP=2` per call → 32 calls × 200 ms = 6-10 s for full open.
+
+Two-part fix:
+
+- **Time-scaled `AdvanceDoors`.** Track wall-clock via `GetTickCount`; advance by `step = elapsed_ms * DOOR_AMT_OPEN / DOOR_MS_FULL_OPEN` (DOOR_MS_FULL_OPEN = 1200). Door open/close duration is now ~1.2 s independent of frame rate. Robust against future perf changes (won't zip open at higher FPS, won't crawl at lower).
+- **Partial-src StretchDIBits.** Suspected GDI was reading the full 64 KB src DIB every WM_PAINT even when `InvalidateRect` had restricted the dirty region. Switched to `srcY = SCR_H - dy - dh` (the formula `reference_stretchdibits_partial_src_gotcha.md` had warned was "easy to get wrong" — got it right here). User verdict: "nessun miglioramento percepibile, siamo sempre sui 4-5 FPS". Conclusion: GDI on MAME-VIS is NOT scanning the full source. Partial-src is correctness-equivalent but not a perf win on this platform. Leaving the change in (it's mathematically correct + smaller theoretical work).
+
+Door anim: user "porte molto meglio ora!". Resolved.
+
+### Perf reckoning (honest)
+
+Before A.13.1: 2-3 FPS. After: 4-5 FPS. Real ~+50-100% improvement. User clocked with stopwatch, not just the perf-bar swatch ("ho provato anche a fare un calcolo un po' più 'vero' con uno stopwatch, ero stato lievemente ottimista").
+
+Where the time goes (estimated, NOT measured):
+
+- Cast (DDA + half-col): ~2-5 ms / frame
+- Wall + ceil + floor pixel writes (tight loops): ~10-15 ms
+- Sprite draw (8 guards + statics, painter sort): ~20-30 ms
+- StretchDIBits (320×200 byte blit + palette translation): ~constant, partial-src didn't help
+- BeginPaint/EndPaint + Win16 message pump + MAME-VIS GDI emulation: **140 ms gap, currently unmeasured**
+
+User pushed back on "this is the hardware floor" framing, correctly. We don't know with certainty — we know we used up the easy levers. To prove or disprove the 140 ms infrastructure floor we'd need split telemetry (cast / wall / sprite / paint reads). Deferred to a future "PF finale" pass after L1 is gameplay-complete.
+
+### Light-by-distance — deferred
+
+Fase 3 of the original A.13.1 bundle. Skipped per the `if perf headroom ≥10 FPS then bundle, else defer` plan from S12 open. We landed at 5 FPS, no headroom; light-by-distance (~+10% inner loop cost) would have eroded the gain. Recorded in todo for a future polish pass — viable as A.13.2 standalone or bundled with the eventual PF finale.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -ox -s -fo=..\build\wolfvis_a13_1.obj wolfvis_a13_1.c` — clean.
+- Link: `wlink @link_wolfvis_a13_1.lnk` — same `IMPORT hcGetCursorPos` chain.
+- Output: `build/WOLFA131.EXE` 248 KB, `build/wolfvis_a13_1.iso` 1.19 MB.
+
+### Result
+
+Snapshot `snap/vis/0021.png` (iter-1 final): blue-stone E1L1 corridor with side-aware light/dark walls + sliding doors visible mid-corridor + guard sprite framed in doorway + minimap with red dots showing distant guards.
+
+Perf: 4-5 FPS measured by stopwatch. Doors fully open in ~1.2 s. Walls render the canonical Wolf3D blue-stone E1L1 layout for the first time since A.4.
+
+### Trap / Gotcha / Eureka (S12)
+
+- **Eureka S12.E1 — Watcom `-ox -s` was the missing project-wide perf lever.** 16 milestones of code-level optimization built without any compiler optimization. Adding `-ox` alone gave more perf than every algorithmic change combined. Captured in `reference_watcom_optimization_flags.md`. Future-me: when perf is suspect, FIRST check the build batch flags, THEN profile, THEN attempt algorithmic changes. The order matters because the cost of compiler-disabled-opt dwarfs anything else at the C level.
+- **Eureka S12.E2 — Hitler-poster bug was hiding blue-stone E1L1 since A.4.** User had thought walls were "supposed to be gray". The (tile-1)*2 % WALL_COUNT collapse meant tile id 1 (ELITE BLUE STONE) was always rendering as wall page 0 = vanilla GRAY STONE. With Tier-3 walls correctly mapping tile 1 to its proper light/dark pair, the canonical Wolf3D E1L1 look surfaced for the first time. Pattern: a "long-standing visual bug" can be hiding the actual asset designer's intent — when a fix surprises the user with "this is supposed to look like X??", suspect a bug-hidden-feature.
+- **Trap S12.1 — Build batch invocation in bash recurring trap.** `cmd.exe //c build_wolfvis_a13_1.bat` failed with relative path even after `cd src`. Fixed via absolute path quoted: `cmd.exe //c "d:/Homebrew4/VIS/src/build_wolfvis_a13_1.bat"`. User flagged as recurring; captured in `reference_build_bat_invocation.md`.
+- **Trap S12.2 — Door anim was render-rate-bound.** Originally `DOOR_STEP=2` per `WM_TIMER(50ms)` = 1.6 s in theory, but at 5 FPS the timer was throttled and full open took ~10 s in practice. Fixed via time-scaled `AdvanceDoors` over `GetTickCount` delta; opens in ~1.2 s independent of frame rate. Lesson: any animation tied to `WM_TIMER` cadence must be time-scaled, not tick-counted, when render rate is variable / low.
+- **Trap S12.3 — Partial-src StretchDIBits did NOT speed up GDI on MAME-VIS.** Hypothesis was that the full 64 KB src scan was eating WM_PAINT time. Switched to mirrored partial src (formula `srcY = SCR_H - dy - dh` per the bottom-up DIB convention, the formula `reference_stretchdibits_partial_src_gotcha.md` warned was easy to mis-do — got it right). Zero perf change. Conclusion: GDI on MAME-VIS clips the src read internally; full-src is NOT a perf cost on this platform. The original A.9 memo's claim of "trascurabile" was actually correct here; we kept the partial-src code because it's mathematically equivalent and safer if the platform ever changes.
+- **Recon-first paid off again.** Pre-coding recon on `WL_DRAW.C` (HitVertWall / HitHorzWall / vertwall / horizwall) gave the canonical side mapping (X-side dark, Y-side light) before any code. Iter-1 was zero-fix for the cast + walls, just like A.14.1 and A.16a. Recon-first is now four-for-four on multi-subsystem milestones.
+
+### Concrete results
+
+- New: `src/wolfvis_a13_1.c` (~1530 LOC, +30 vs A.16a — net additions despite removing CAST_STEP_SHIFT and the sub-step DDA branch), `src/wolfvis_a13_1_sintab.h`, `src/wolfvis_a13_1_atantab.h`, `src/build_wolfvis_a13_1.bat` (with `-ox -s`), `src/link_wolfvis_a13_1.lnk`, `src/mkiso_a13_1.py`.
+- New: `cd_root_a13_1/` (9 files: A.16a set with `WOLFA131.EXE` + `SYSTEM.INI` updated to `shell=a:\WOLFA131.EXE`).
+- New: `build/WOLFA131.EXE` (248 KB), `build/wolfvis_a13_1.iso` (1.19 MB).
+- New: `snap/vis/0021.png` (blue-stone E1L1 + corridor doors + guard).
+- README: A.13.1 row added; quick-start commands updated to A.13.1 binaries.
+- Memory: `reference_watcom_optimization_flags.md` (NEW), `reference_build_bat_invocation.md` (NEW), `MEMORY.md` index updated.
+- Deferred: light-by-distance → A.13.2 or PF finale post-L1.
+
+### Next-step candidates for Session 13
+
+1. **A.16b — Enemy AI ticker** (~1.5-2 h). Reuse A.16a Object[] + DrawAllSprites with rotation. State machine (idle/walk/attack/hit/die) + LOS check + walking-frame animation cycle. With 5 FPS effective rate, AI verification will rely on slow-motion observation; gameplay testing may need to wait for A.18 firing to assess responsiveness. **Strong default.**
+2. **A.17 — Weapon overlay (start)** (~1 h). Gun sprite at bottom-center + PRIMARY animation cycle, no firing yet. Visual milestone, low complexity.
+3. **A.15.1 — Real BJ face from VGAGRAPH** (~1-1.5 h). Chunked Huffman loader + picture table for VGAGRAPH.WL1. Lower priority (placeholder works), unlocks title screen + menu graphics.
+
+S12 wrap recommendation: **A.16b first** per the original S11/S12 roadmap. PF finale (split telemetry + further perf attack) deferred to post-L1 per user direction: "finiamo le aggiunte per arrivare a un livello 1 completo, poi faremo un round di diagnostica e PF finale".
+
+### S12 wrap-up
+
+Single milestone, single sitting, four iterations (DDA+walls / -ox / half-col+tight-loop / partial-src+door-time-scale). One clean recovery from "perf invariato" finding (the build-flag discovery saved the session from feeling like a wash). User feedback steered the session twice: pushed back on premature "hardware floor" framing (correct — we never measured, just estimated) and confirmed door-anim showstopper (a real defect orthogonal to perf).
+
+Bonus discoveries: (1) Watcom `-ox -s` is project-wide retrofit lever — every future build batch needs it; (2) blue-stone E1L1 is the canonical Wolf3D look (not gray); (3) door anim must be time-scaled when render rate is variable; (4) GDI on MAME-VIS does NOT pay the full-src scan cost (memo `reference_stretchdibits_partial_src_gotcha.md`'s "trascurabile" turned out to be correct on this platform).
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md + memory in the same commit. One commit for S12 close (the four iterations are logically one bundle, no cherry-pickable midpoints).
+
+---
