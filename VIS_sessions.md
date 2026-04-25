@@ -1186,3 +1186,106 @@ The "raycaster gentle" rule's prediction extends one more milestone: with A.13's
 Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit.
 
 ---
+
+## Session 10 (continued) — 2026-04-25 — Milestone A.15 (HUD / status bar)
+
+**Scope:** the screen has chrome around the play area for the first time. After A.14.1 closed the door regression with zero iterations, the user opted to continue S10 into a second milestone since context was fresh and pacing memo aligned ("non rimandare a prossime sessioni ciò che si può fare ora"). Goal: lift the visual framing from "tech demo with black borders" to "game with a status bar", without altering the cast workload — A.15 is perf-neutral by construction (HUD is a pixel-constant blit baked into static_bg).
+
+User selected scope at S10 part-2 open: A.15 over A.16 enemies (smaller commit, perf-neutral, doesn't compound A.14.1's 2-3 FPS observation).
+
+### Recon — BJ face is in VGAGRAPH, not VSWAP
+
+First step was looking up the BJ face sprite chunk index in the Wolf3D source (same recon pattern that made A.14.1 zero-iteration). Discovery: `FACE1APIC` lives at chunk 113 in `GFXV_WL1.EQU`, but that's the **VGAGRAPH** file, not VSWAP. VGAGRAPH is a separately-formatted asset file (chunked Huffman compression, picture table, dimensions header) that we have no loader for — implementing it would be a sub-milestone of its own.
+
+Pragmatic pivot: skip the real BJ face for A.15, render a stylized **24×24 placeholder face** drawn from `FB_FillRect` primitives (helmet + skin + eye dots + mouth). No bitmap data in the EXE. Real face deferred to **A.15.1 polish** when we add a VGAGRAPH loader.
+
+### HUD layout (final, after one iteration)
+
+37-px strip occupies the previously-black `y=163..199`. After the user fed back on the first cut ("rimpicciolire un pochino i primi due quadranti a SX in modo che il volto sia centrato"), the layout was redesigned to be symmetric around screen center (x=160) with FACE in the middle:
+
+| panel  | x range  | width | content                |
+|--------|----------|-------|------------------------|
+| LEVEL  | 0..35    | 36 px | 1-digit value `1`      |
+| SCORE  | 36..107  | 72 px | 6-digit value `000000` |
+| LIVES  | 108..143 | 36 px | 1-digit value `3`      |
+| FACE   | 144..175 | 32 px | 24×24 face at x=148    |
+| HEALTH | 176..223 | 48 px | 3-digit value `100`    |
+| AMMO   | 224..271 | 48 px | 2-digit value `08`     |
+| KEYS   | 272..319 | 48 px | gold + silver icons    |
+
+Borders: 1-px top line at `y=163`, 1-px vertical separators at panel boundaries. Bottom = screen edge.
+
+### Color iteration — gamepal lookup beats guessing
+
+First-cut colors guessed at gamepal indices and got bitten:
+- `HUD_BG = 8` (assumed dark grey, came out as it should — but too plain).
+- `HUD_BORDER = 16` (assumed lighter grey, came out white — too bright).
+- Face helmet `144` (assumed brown, came out blue!), brim `142` (also blue), skin `84` (came out dark teal), silver key `31` (came out near-black).
+
+User feedback after first build ("Sarebbe da renderlo su sfondo blu come il vero W3D, e rimpicciolire un pochino i primi due quadranti a SX") drove the v2 pass. Rather than guess again, this time we read `gamepal.h` directly to verify RGB triplets:
+
+| index | RGB6              | use                              |
+|-------|-------------------|----------------------------------|
+| 1     | (0, 0, 42)        | HUD_BG dark blue (Wolf3D-style)  |
+| 9     | (21, 21, 63)      | HUD_BORDER bright blue separator |
+| 15    | (63, 63, 63)      | white digits                     |
+| 60    | (57, 27, 0)       | helmet brown (came out orange)   |
+| 56    | (63, 42, 23)      | skin/peach                       |
+| 8     | (21, 21, 21)      | helmet brim dark grey            |
+| 7     | (42, 42, 42)      | silver key light grey            |
+| 14    | (63, 63, 21)      | gold key yellow                  |
+
+v2 build worked first try. Snapshot `0015.png` confirms: dark blue panels with light blue separators, white digits clearly readable on blue, FACE perfectly centered around x=160 with brown helmet over peach skin, both key icons (gold + silver) visible. Palette index 60 came out more orange than dark brown but reads well against the blue, so kept as-is.
+
+### Subsystems added vs A.14.1
+
+- **`digit_font[10][24]`** — 4×6 byte-per-pixel digit font as `static const`, ~240 B in code. Each digit is hand-authored as a flat array of 0/1 bits. Pitch 5 px (4 px digit + 1 px gap) means a 6-digit score occupies exactly 29 px.
+- **`DrawDigit(x, y, d, fg)`** — emits one glyph via `FB_Put` per lit pixel.
+- **`DrawNumber(x, y, val, width, fg)`** — right-align with leading zeros, modular over `width` digits. Used by every HUD value.
+- **`DrawFacePlaceholder(x0, y0)`** — 24×24 helmet+skin+eyes+mouth via 8 `FB_FillRect` calls. Zero asset dependency.
+- **`DrawHUD()`** — strip background + top border + vertical separators + every panel value + face placeholder + key icons.
+- **`SetupStaticBg` extended** — `DrawHUD()` is called inside the static-bg setup so the HUD pixels are baked into `framebuf` once at boot. Per-frame cost is **zero** because nothing in the per-frame paint path ever overwrites `y=163..199` (DrawViewport writes only `y=35..162`, DrawMinimapWithPlayer only `y=35..98`, DrawDebugBar only `y=0..29`). The `InvalidateRect` dirty rect in `InvalidatePlayerView` deliberately excludes the HUD region too.
+
+### Build
+
+- Compile: `wcc -zq -bt=windows -ml -fo=..\build\wolfvis_a15.obj wolfvis_a15.c` — clean, no warnings.
+- Link: `wlink @link_wolfvis_a15.lnk`.
+- Output: `build/WOLFA15.EXE` 246 KB (+1 KB vs A.14.1 — only added font const + draw helpers), `build/wolfvis_a15.iso` 1.16 MB.
+
+### Result
+
+Confirmed working on MAME 0.287 vis. Snapshots `snap/vis/0013.png` (first cut, grey BG + off-center FACE), `0014.png` (alternate angle of first cut), `0015.png` (v2: blue Wolf3D-style HUD with centered FACE). User v1 reaction: "Prima reazione: CUTE XD". User v2 reaction: "Snap fatto in realtà, controlla, direi ottimo!".
+
+### Trap / Gotcha / Eureka (S10 part 2)
+
+- **Trap S10.2 — Wolf3D status bar BJ face is in VGAGRAPH, not VSWAP.** Reasonable assumption was that the face would be a sprite in VSWAP alongside Demo/DeathCam/STAT_*, but `FACE1APIC=113` is in `GFXV_WL1.EQU` which indexes VGAGRAPH chunks. VGAGRAPH uses a different format (chunked Huffman + picture table) we don't have a loader for. Pivoted to programmatic placeholder. Recovery cost: 0 — discovery happened before any code was written.
+- **Trap S10.3 — Guessing palette indices burns iterations.** First-cut DrawHUD guessed indices for "brown / lighter grey / silver" and got blue / white / near-black instead. Each wrong index forced a rebuild + relaunch + visual check cycle. Fix: read `gamepal.h` RGB6 triplets directly before picking colors. v2 colors were all correct on first try. Lesson: for any new color use, look up the actual triplet in gamepal.h — don't extrapolate from "color N looked like X in a different palette".
+- **Eureka S10.E4 — Static-bg bake = zero per-frame HUD cost.** Because the per-frame redraw path uses `InvalidateRect` with a dirty rect that excludes `y=163..199`, and because no draw helper writes to that region after boot, baking the HUD into `framebuf` once during `SetupStaticBg` is enough. The HUD pixels persist across every WM_PAINT (clipped or full). When A.16+ wires real game state, the only delta is calling `DrawHUD` again from `InvalidatePlayerView` and extending the dirty rect — the static layout machinery doesn't change.
+- **Eureka S10.E5 — Symmetric layout around screen center is the readable default.** First cut was 64-px-uniform panels which worked but pushed FACE to x=176 (off-center by 16 px). User immediately spotted "il volto è scentrato". Symmetric design: panels left of center + face panel + panels right of center, with each side summing to 144 px. Result reads as "balanced" without any further commentary. Pattern applies to any future centered-element HUD work.
+
+### Concrete results
+
+- New: `src/wolfvis_a15.c` (~1430 LOC, +150 vs A.14.1), `src/wolfvis_a15_sintab.h` (copy of A.14.1 sintab), `src/link_wolfvis_a15.lnk`, `src/build_wolfvis_a15.bat`, `src/mkiso_a15.py`.
+- New: `cd_root_a15/` (9 files: A.14.1 set with `WOLFA15.EXE` + `SYSTEM.INI` updated to `shell=a:\WOLFA15.EXE`).
+- New: `build/WOLFA15.EXE` (246 KB), `build/wolfvis_a15.iso` (1.16 MB).
+- New: `snap/vis/0013.png` (first cut HUD), `snap/vis/0014.png` (first cut alt angle), `snap/vis/0015.png` (final blue Wolf3D-style HUD).
+- README: A.15 row added to status table (✅). Quick-start build/launch commands updated to A.15 binaries.
+
+### Next-step candidates for Session 11
+
+1. **A.16 — Dynamic enemies** (~2-3 h). The remaining "PoC playable demo" architectural piece. Standing guards (obj 108..115) and patrol guards (116..127). Reuses A.14's Object[] + DrawSpriteWorld with frame animation per state (idle/walk/hit/death) and a simple AI ticker. Likely split into A.16a (rendering static enemies) + A.16b (AI movement). With this in, the HUD's dummied values can start being driven by real game state (damage → HEALTH, kills → SCORE, picked-up clips → AMMO).
+2. **A.13.1 — Raycaster polish** (~45-60 min). Grid-line DDA proper, light-by-distance Wolf3D palette ramp. Worth pulling forward if perf becomes an interaction blocker before A.16.
+3. **A.15.1 — Real BJ face from VGAGRAPH** (~1-1.5 h). Implement the chunked Huffman loader + picture table parsing for VGAGRAPH.WL1. Gives us authentic BJ face frames + the title screen pic + menu graphics. Lower priority than A.16 (the placeholder is functional), but the unlock is broader than just the face.
+4. **A.10.1 reopen.** IMF stacchi.
+
+S10 part-2 wrap recommendation: A.16 next, split into A.16a/b. With doors + HUD + sprites + walls + cast all working, dynamic enemies are the last visible gap before "playable demo PoC" status.
+
+### S10 part-2 wrap-up
+
+Single milestone, single sitting (continuation of S10), one iteration on layout/colors driven by direct user feedback ("cute" + "rendi blu" + "centra il volto"). Foundation chain A.1..A.14.1 paid off again — A.15 is +150 LOC of pure additive code (font, helpers, DrawHUD) with one line of integration into `SetupStaticBg`. No structural change to anything pre-existing. Net per-frame cost: zero (all baked into static_bg).
+
+Two new traps documented for future use: (1) BJ face is in VGAGRAPH not VSWAP — relevant to any future "use a Wolf3D pic" milestone; (2) gamepal indices must be looked up not guessed — relevant to any new color in any future render code.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md in the same commit. Two commits in one session this time (A.14.1 + A.15) to keep the history bisectable.
+
+---

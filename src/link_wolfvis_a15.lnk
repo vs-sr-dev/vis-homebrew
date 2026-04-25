@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA15.EXE
+FILE          ..\build\wolfvis_a15.obj
+OPTION        MAP=..\build\WOLFA15.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.15 HUD (status bar with dummy values + face placeholder)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
