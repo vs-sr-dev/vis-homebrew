@@ -1,0 +1,10 @@
+SYSTEM        windows
+NAME          ..\build\DDTEST.EXE
+FILE          ..\build\dispdib_test.obj
+OPTION        MAP=..\build\DDTEST.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'DispDib NOWAIT brute-force test (S16 A.21 B-leg)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=4096
+EXPORT        DDTestWndProc
+IMPORT        DisplayDib    DISPDIB.DISPLAYDIB

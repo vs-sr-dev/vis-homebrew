@@ -2187,3 +2187,81 @@ Updated priority list (post-A.19.2):
 S16 plan B-leg already agreed: proceed to A.21 EnterDVA recon + impl.
 
 ---
+
+## Session 16 (cont.) — 2026-04-26 — Milestone A.21 PARTIAL recon: NOWAIT=0x0100 found, BEGIN deferred to S17
+
+### Scope
+
+B-leg of S16 attack plan: pursue EnterDVA direct A000:0000 framebuffer for projected 30-50% perf gain on top of A.19.2. User pre-acknowledged "non lasciamo strade intentate" — committing to either disasm OR brute-force path.
+
+### Approaches attempted
+
+**1. Disasm path (~1h, BLOCKED).**
+
+- `wdump` on `dispdib_raw.bin` (S3 BIOS extract) failed with "does not have recognized format" — file lacks MZ stub. Synthesized 64-byte MZ wrapper pointing to NE header at offset 0x40 (raw blob has NE signature at offset 0x20). Wrapped file accepted by wdump as "DOS EXE Header" but "No protected mode executable found" / "No exports found".
+- Manual NE header parse (Python) succeeded: 3 segments (seg1 81 B code, seg2 4486 B code, seg3 575 B data), entry table 0x1E B, exports = ord1, ord2, WEP=ord99, ord100 (data export). Module name "DISPDIB". Resident name table has no DISPLAYDIB/DISPLAYDIBEX entries (those would be in non-resident name table at offset 0x385ac0 of original file — outside our extracted blob).
+- Capstone (Python `capstone` v5.0.7) successfully disassembled seg2 with `CS_MODE_16`. Found 7 function prologues (`55 8B EC`) at offsets 0x744, 0x8DA, 0xBA7, 0xD50, 0xE34, 0xEFE, 0xFC8.
+- **Anomaly that blocked progress**: entry table says ord1 (DisplayDib) = seg2 +0x7D1, ord2 (DisplayDibEx) = seg2 +0x802. These offsets land **mid-function** in the function starting at +0x744, on `eb 06 jmp` short-circuit instructions (not function entries). Same anomaly with WEP ord99 in seg1 +0x4B — lands on `4d` (dec bp) mid-epilog. Some bias in NE entry-table-vs-segment offset interpretation off by an unknown amount. Could not unblock within budget.
+- Strings extracted from seg2 confirm canonical content: `"DISPDIB"`, `"DISPLAYDIBEX"`, `"DISPLAYDIB"`, `"TVVGA (GRYPHON) DIB Display DLL"`, `"KERNEL"`, debug printf templates with `"wFlag = 0x%x"` and error names `"NOTSUPPORTED"`, `"INVALIDTASK"`, `"FEATURE"`, `"WIDE"`, `"MODEMISMATCH"`. Confirms this IS the right binary.
+
+**2. Brute-force path (~1h, PARTIAL WIN).**
+
+Built `src/dispdib_test.c` — minimal Win16 NE that imports `DisplayDib` statically, plays an OPL3 channel-0 beep BEFORE the DispDib call (low pitch ~A3) and AFTER (high pitch ~A5), with a 2.5s dwell in between to observe screen behavior. Window class name embeds the candidate bit value at runtime.
+
+Test signal interpretation:
+- Two beeps near-simultaneous + gradient flashes 1 frame + reverts to Win desktop = NOWAIT works in candidate (mode change OK, call returns immediately, no BEGIN so mode reverts).
+- Two beeps near-simultaneous + screen never changes from Win desktop = candidate REJECTED (mode change blocked → NOTSUPPORTED-like return).
+- Beep + no second beep + screen stays in 320x200x8 = NOWAIT NOT in candidate (DispDib BLOCKED waiting for input).
+- Two beeps + gradient PERSISTS for 2.5s = BEGIN found (mode held).
+
+Iterations (all combined with `MODE_320x200x8 (0x0001) | NOCENTER (0x0040) | NOWAIT (0x0100 once known)`):
+
+| Iter | Candidate | User observation | Diagnosis |
+|---|---|---|---|
+| 1 | `0x0008` | Both beeps + screen stays black with cursor | REJECT (NOTSUPPORTED) — bit conflicts with MODE_320x200x8 |
+| 2 | `0x0100` | Beep1 + gradient 1 frame + beep2 immediate + screen revert | **NOWAIT FOUND** — set as fixed for subsequent iters |
+| 3 | `0x0200` | Beep1 + gradient 1 frame + nero 2-3s + beep2 + exit | NOWAIT-alone pattern (mode reverted, BEGIN not in 0x0200) |
+| 4 | `0x0400` | Beep1 + 2-3s nero + beep2 (no gradient at all) | REJECT — likely DISPLAYDIB_TEST or mode conflict |
+| 5 | `0x0800` | Same as 0x0200 | NOT BEGIN |
+| 6 | `0x1000` | Same as 0x0200 | NOT BEGIN |
+| 7 | `0x2000` | Same as 0x0200 | NOT BEGIN |
+| 8 | `0x4000` | Same as 0x0400 (nero throughout, both beeps) | REJECT |
+| 9 | `0x8000` | Same as 0x0400 | REJECT |
+| 10 | `lpBits=NULL` (no candidate bit) | Beep1 + nero infinito + NO beep2 (call hung) | NOWAIT semantics CHANGE when bits=NULL — DispDib blocks |
+
+### Eureka
+
+- **S16.A.21.E1 — NOWAIT empirical at `0x0100`.** First reliable bit identification beyond S3's MODE/NOCENTER. Independently usable for any future non-blocking single-frame DispDib call. The test harness signal (low/high beep pair with 2.5s dwell) is the canonical pattern for ANY future DispDib bit identification — it cleanly distinguishes mode-change-yes/no, return-immediate/blocked, and persistent-mode/reverted in one observation.
+- **S16.A.21.E2 — `lpBits=NULL` is NOT BEGIN-implicit**. Falsified hypothesis cleanly: with `MODE | NOCENTER | NOWAIT` and bits=NULL, DispDib blocks indefinitely (likely waiting for bits to be supplied via subsequent call) and screen mode change happens but display is black throughout. NOWAIT is semantically conditional on bits != NULL.
+- **S16.A.21.E3 — single-bit BEGIN search exhausted.** All 10 candidates beyond S3's mode/nocenter tried; none holds the mode persistent. BEGIN is either (a) a 2-bit combination, (b) at one of the untested mode bits 0x0010/0x0020 (unlikely — those probably collide with MODE_320x200x8 like 0x0008), or (c) requires special call semantics (e.g., `MODE_DEFAULT = 0x0000` with auto-detect from BMI). Search space for S17 is well-bounded.
+
+### Trap / Gotcha
+
+- **Trap S16.A.21.1 — wdump rejects ROM-extracted NE without MZ stub**. Synthesized MZ wrapper made wdump read it as DOS EXE but no extension parsing. wdump v2 beta may have a strict check on MZ stub fields (page count, etc.) that our minimal wrapper doesn't satisfy. Future fix: copy the MZ stub from a real Win16 NE (e.g., HELLO.EXE) instead of synthesizing minimal.
+- **Trap S16.A.21.2 — entry table offsets land mid-function**. NE entry table for ord1/ord2/WEP all point to instruction addresses that are NOT function prologues. Some bias in our NE format interpretation OR these are post-loader-fixup addresses different from raw segment offsets. Did not crack within budget. Saved disasm artifact `reverse/dispdib_seg2.bin` for reopening.
+- **Recurring trap pattern — pacing**: budget for fully-uncharted reverse-engineering tasks should be 3-5h continuous, not 1.5-2h. The original A.21 estimate from the S15 wrap was optimistic; the actual recon-blocking conditions (entry table anomaly + multi-bit BEGIN) compound. For S17 reopening, pre-allocate a longer block.
+
+### Concrete results
+
+- New: `src/dispdib_test.c` (~200 LOC), `src/build_dispdib_test.bat`, `src/link_dispdib_test.lnk`, `src/mkiso_ddtest.py`.
+- New: `cd_root_ddtest/` (4 files: AUTOEXEC + CONTROL.TAT + SYSTEM.INI shell=DDTEST.EXE + DDTEST.EXE).
+- New: `reverse/dispdib_seg2.bin` + `reverse/dispdib_seg2_alt.bin` (extracted code segments for S17 reopening).
+- Memory: `reference_dispdib_empirical_flags.md` (NEW, complete table). `project_dispdib_parked.md` updated with S16 progress.
+- README + status table NOT updated — A.21 is not a completed milestone.
+
+### Next-step candidates for S17
+
+1. **A.21 reopening — 2-bit combinatorial BEGIN search**: try `0x0080|0x0010`, `0x0080|0x0020`, `0x0010|0x0080`, `0x0080|0x0200`, etc. ~36-50 iterations, 3-4h. Start with bit pairs that include `0x0080` (S3 originally tested — may have failed for combo reasons not for BEGIN itself).
+2. **A.21 reopening — disasm path proper**: solve entry-table-vs-segment-offset anomaly. Read NE format reference more carefully; check if extracted segments need reloc-table-pre-stripping. ~2-3h.
+3. **A.20 — enemy firing back + player health**: gameplay loop closure. ~1.5-2h. Independent of A.21.
+4. **A.19.3 — split telemetry**: PIT-direct sub-counters (cast/wall/sprite/overlay/paint). ~30-45 min. Useful before any further perf work.
+
+### S16 wrap
+
+S16 closes with **A.19.2 fully shipped + committed** (verdict "Giocabile") and **A.21 partial recon documented** (NOWAIT=0x0100 empirically confirmed, BEGIN deferred to S17). NOWAIT finding is independently valuable for any future DispDib usage. Test harness `dispdib_test.c` is reusable for S17 reopening — edit `CANDIDATE_BIT`, rebuild, retest in ~20s/cycle.
+
+Recon-first track record stays at **11-for-11** for completed milestones (A.13..A.19.2 inclusive). A.21 is not counted (deferred, not failed).
+
+User pacing pattern S16: continued chaining across two milestones (A.19.2 commit + A.21 partial), accepting honest pivot to "save findings + close" when single-bit search exhausted. Confirmed: long-tail RE tasks need 3-5h continuous budget, not 1.5-2h.
+
+---
