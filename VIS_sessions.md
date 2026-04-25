@@ -1731,3 +1731,84 @@ User experience arc: A.16b "horror stare" → A.17 fan-art pistol → A.17 vanil
 Push: A.16b commit `2d9e905` pushed mid-session at user direction. A.17 to be pushed after wrap.
 
 ---
+
+## Session 14 — 2026-04-25 — Milestone A.18 firing + hitscan + damage
+
+### Scope
+
+Single milestone. Close the gameplay loop: PRIMARY fires the pistol, hitscan finds the closest visible enemy whose projected screen span straddles the crosshair column, damage drops `Object.hp`, dying guards play a 3-frame DIE animation and freeze on the DEAD sprite. Ammo and score update on the HUD via partial-rect re-blit. Door toggle migrated to SECONDARY (the A.14.1 OPL sanity click is dropped).
+
+Scope inherited verbatim from the S14 opening TODO: 8-phase plan (sprite slot extension / input rebind / weapon FSM / hitscan / damage state / sprite picker / HUD redraw / build+test). User accepted option (A) "A.18 secco" — A.15.1 BJ face deferred.
+
+### Recon (~5 min)
+
+Two pieces validated before coding:
+
+- **`SPR_GRD_PAIN_1..DEAD` are at fixed sprite-enum indices 90..95** (`WL_DEF.H:205-206`), not in the trailing weapon-arsenal range. The S14 opening TODO had wrongly noted "chunks total-10..-5 area" — these slots in the trailing 20 are MGUN frames. Pain/die/dead carry **absolute** offsets in `sprite_chunk_offs[]` (no runtime patch), unlike PISTOLATK1..4 which sit at the trailing tail and need `total - 14..-11` discovery (mirror of A.17 `total - 15` for PISTOLREADY).
+- **z-buffer at `g_zbuffer[VIEW_W/2]` already gives the wall-distance for the crosshair column** every frame — no separate `CastRay` call needed for the hitscan. The DrawSpriteWorld projection math (cam_y = rx·cos + ry·sin, screen_x = VIEW_W/2 + cam_x·focal/cam_y, sprite_h = (VIEW_H<<8)/cam_y) is reusable verbatim for "does this enemy's projected span cover the crosshair pixel".
+
+### Implementation
+
+Single source file `src/wolfvis_a18.c` (~3210 LOC, +~250 LOC vs A.17). Eight additive changes on the A.17 baseline:
+
+- **Sprite slot extension**. `NUM_SPRITES` 59 → 67. Slots 59..62 = SPR_PISTOLATK1..4 (placeholders, runtime-patched in `LoadVSwap` to `total - 14..-11`); slots 63..65 = SPR_GRD_DIE_1..3 (compile-time 91..93); slot 66 = SPR_GRD_DEAD (compile-time 95). PAIN_1 (90) and PAIN_2 (94) skipped per PoC scope (vanilla pain is a one-frame flash, not load-bearing).
+- **Input rebind**. `VK_HC1_PRIMARY` calls `FireWeapon(hWnd)`; `VK_HC1_SECONDARY` calls `ToggleDoorInFront()`. The A.14.1 OPL click on SECONDARY is removed (superseded by F1/F3 music keys).
+- **Weapon FSM**. Two states (READY / FIRING). `FireWeapon` gates on READY + `g_ammo > 0`; on accept it decrements ammo, kicks the FSM into FIRING phase 0, runs `FireHitscan`, schedules HUD ammo redraw. `AdvanceWeapon` (called from WM_TIMER beside AdvanceDoors / AdvanceEnemies) advances the FIRING phase every `WEAPON_PHASE_MS = 100 ms`, auto-returns to READY at phase 4. `DrawWeaponOverlay` switches between `PISTOL_READY_SLOT` and `PISTOL_ATK1_SLOT + phase`.
+- **Hitscan first-hit**. `FireHitscan` walks `g_objects[]`, projects each living enemy into camera space, computes `screen_x` + `sprite_h`, and tests whether `VIEW_W/2` falls inside `[screen_x - sprite_h/2, screen_x + sprite_h/2]`. The wall-distance gate uses `g_zbuffer[VIEW_W/2]` directly — no CastRay re-projection needed. Closest passing enemy by smallest `cam_y_q88` is the hit; ties broken by iteration order.
+- **Damage + state machine**. `Object.hp` (BYTE, init `GUARD_HP_INIT = 25` for guards, 0 for decorations). Damage roll = `5 + (Prng7() & 7)` = 5..12 via a tiny LCG (no rand() runtime). On lethal hit: `state = OBJ_ST_DIE`, `state_phase = 0`, `state_tick_last = now`; `g_score += 100`, `g_kills++`, RedrawHUDScore. AdvanceEnemies extended: DIE state plays 3 frames at `ENEMY_PHASE_MS = 250 ms` then transitions to `OBJ_ST_DEAD`. DEAD state is frozen — no movement, no LOS contribution, but still painter-sorted (corpses must z-order with live sprites).
+- **Sprite picker switch**. DrawAllSprites: STAND/WALK paths unchanged. DEAD → `GRD_DEAD_SLOT` (non-rotating). DIE → `GRD_DIE1_SLOT + state_phase` (non-rotating, vanilla `statetype.rotate=false`). Decorations (enemy_dir == OBJ_DIR_NONE) bypass the state switch entirely.
+- **HUD partial re-blit**. `RedrawHUDAmmo` / `RedrawHUDScore`: clear the digit box with `HUD_BG` FillRect, draw new value with `DrawNumber`, `InvalidateRect` the small rect. `framebuf` is patched in-place; `static_bg` (the A.15 bake) is left untouched. The framebuf HUD region is otherwise never overwritten by `DrawViewport` (which writes only inside the viewport rect), so values persist between fires. Bonus: `HUD_FG_LOW` (red, color 40) automatically applied when `g_ammo == 0` — the user spotted this without prompting.
+- **Game state vars**. `g_weapon_state` / `g_weapon_phase` / `g_weapon_tick_last`, `g_ammo` (init 8), `g_score` (init 0), `g_kills` (telemetry), `g_prng` (LCG seed).
+
+### Build
+
+- Compile + link: clean, **single-iteration zero-fix**. `WOLFA18.EXE` 224 KB (vs A.17's 256 KB — Watcom ditched some DGROUP padding when the new code happened to align). Eight subsystems extended in one pass without a single warning.
+- ISO: `build/wolfvis_a18.iso` 1.19 MB. `cd_root_a18/` cloned from `cd_root_a17/` with `WOLFA18.EXE` + `SYSTEM.INI shell=a:\WOLFA18.EXE`.
+
+### Result
+
+Three test snapshots in MAME-VIS:
+
+- `snap/vis/0026.png`: mid-combat. Player facing a guard in front of a closed door. **Ammo 07** (one shot fired). Score 000000 (kill not yet). Pistol overlay visible at viewport bottom-center.
+- `snap/vis/0027.png`: same approach, **Ammo 06** (second shot). Score still 000000. Confirms the FSM didn't double-decrement, and the FIRING-state taps gating works (PRIMARY tap during anim is dropped).
+- `snap/vis/0028.png`: **closing scene**. SCORE = **000100** (kill registered). AMMO = **00 in red** (HUD_FG_LOW color 40 — `g_ammo == 0` branch confirmed without explicit ask). **Cadaver visible in the world**: the canonical Wolf3D SPR_GRD_DEAD sprite (sprawled, blood pool) at the corpse's last position, painter-sorted with the live guard visible in the distance behind it. Pistol overlay back to PISTOL_READY (FSM returned to READY after cycle). Player has clearly fired ~8 shots to land enough damage on a single 25-HP guard at 5..12 dmg per hit (high-side rolls = 3 hits would suffice; low-side could be 5 — between RNG and possible misses, 8 shots for 1 kill is in band).
+
+User verdict: 1, 2, 3 confirmed visually (kill + DIE/DEAD anim, ATK frame cycle, PRIMARY/SECONDARY rebind). Point 4 (wall occlusion of bullet) untestable at 4-5 FPS — the user can't move with enough flow to engineer the geometry. Logically correct via z-buffer-occlusion test in `FireHitscan` (closest enemy with `cam_y < g_zbuffer[VIEW_W/2]` wins; if the wall is closer the gate rejects), but flagged as deferred verification to S15 PF finale where higher FPS would make the test reproducible.
+
+### Trap / Gotcha / Eureka (S14)
+
+- **Eureka S14.E1 — recon-first now 6-for-6 on multi-subsystem milestones.** A.18 touched 8 subsystems (sprite slots, Object struct, AI ticker, weapon FSM, hitscan projection, sprite picker, HUD redraw, input rebind). Compiled clean + ran behaviorally correct first try after a ~5 min recon pass. The A.13 / A.14 / A.14.1 / A.16a / A.13.1 / A.16b / A.18 streak is now too consistent to be luck — recon-first is canonical for this project, period. Cost (5-10 min reading vanilla sources) << cost of an iteration cycle (5-10 min compile + ISO + boot + read result + figure out which subsystem broke).
+- **Eureka S14.E2 — z-buffer at the crosshair column IS the hitscan wall test.** Initial plan was to re-project a ray via `CastRay(g_pa)` for the hitscan; the recon pass realized the per-frame z-buffer already carries the wall distance for VIEW_W/2 because DrawViewport's half-col cast loop fills it. Net savings: one ray cast per fire, ~2-5 ms saved on each PRIMARY tap. More importantly: the wall-vs-enemy occlusion test is **automatically consistent** with what's drawn — the same z-buffer value gates both rendering and combat. Pattern: when adding a new query against world geometry, check whether the existing render pipeline already computed the answer.
+- **Eureka S14.E3 — `Object.hp` BYTE was the right primitive.** Storing damage state as a single hp counter (rather than a separate "alive bool" + "damage taken" pair) means: (a) decorations get hp=0 trivially, (b) the kill check is `dmg >= hp`, (c) one struct field grows. Future damage-source variants (machinegun does 2x base, knife does melee-only) all flow through the same `DamageEnemy(idx, dmg)` callsite. Vanilla Wolf3D's `Object.hitpoints` lives in the same role.
+- **Trap S14.1 (caught in recon, not in iter) — TODO memo had wrong PAIN/DIE/DEAD offset zone.** The S14 opening notes claimed "chunks total-10..-5 area" — but those are MGUN frames. The pain/die/dead chunks are at fixed sprite-enum indices 90..95 (vanilla `WL_DEF.H:205-206`). Caught the discrepancy by reading `WL_DEF.H` directly before extending `sprite_chunk_offs[]`. Saved an iteration: had we used the trailing-tail offsets, MGUN sprites would have shown up where DEAD sprites should — visually wrong but not crashy, would have wasted ~10 min to diagnose. Lesson: **TODO opening memos are forecast, not ground truth.** Always re-verify against the canonical source before coding the offsets.
+- **No iteration cycles.** Eight subsystems wired correctly first try. The cleanest single-iteration milestone in the project so far.
+
+### Concrete results
+
+- New: `src/wolfvis_a18.c` (~3210 LOC, +~250 vs A.17), `src/build_wolfvis_a18.bat`, `src/link_wolfvis_a18.lnk`, `src/mkiso_a18.py`.
+- New: `cd_root_a18/` (9 files: A.17 set with `WOLFA18.EXE` + `SYSTEM.INI` updated `shell=a:\WOLFA18.EXE`).
+- New: `build/WOLFA18.EXE` (224 KB), `build/wolfvis_a18.iso` (1.19 MB).
+- New: `snap/vis/0026.png`, `snap/vis/0027.png`, `snap/vis/0028.png` (mid-combat → out-of-ammo → corpse + 100 score).
+- README: A.18 row added, quick-start updated to A.18.
+- Memory: `project_milestone_A18_firing.md` (NEW), `MEMORY.md` index updated, `project_S14_todo_opening.md` retired in favor of S15 opening.
+
+### Next-step candidates for Session 15
+
+1. **PF finale + diagnostic** (deferred since A.13.1). Split telemetry (cast / wall / sprite / paint reads) to isolate the ~140 ms unaccounted-for gap in the per-frame budget. Algorithmic attack on the actual measured bottleneck. Required before the 4-5 FPS becomes acceptable for a public demo.
+2. **A.15.1 — Real BJ Blazkowicz face from VGAGRAPH** (~1-1.5 h). VGAGRAPH chunked Huffman loader (separate from VSWAP), FACE1APIC..FACE3CPIC chunks, 8 hp-state face frames driven by `g_health` (PoC keeps the placeholder helmet otherwise; needs gating on `g_health` decrement which itself requires enemy-firing-back from A.19).
+3. **A.19 — Pain flash + enemy firing back + player health**. Vanilla T_Chase RNG-gated shoot branch (chance/300), SPR_GRD_SHOOT1..3 (chunks 96..98), player damage on hit, `g_health` decrement, HUD health re-blit. Closes the symmetric combat loop. Pain flash for guards (one-frame s_grdpain) bundled.
+4. **SFX on fire** (~30 min). OPL3 sound chunks live in VSWAP after the sprite range (`sound_start_idx`). Single chunk play on fire is trivial; SFX scheduler for queueing multiple is more involved.
+
+S14 wrap recommendation: **PF finale first** in S15. The user explicitly deferred light-by-distance and split telemetry to "post-L1" (S11/S12 thread) with the framing "finiamo le aggiunte per arrivare a un livello 1 completo, poi faremo un round di diagnostica e PF finale". Gameplay loop is now closed (firing + dying enemies + score + ammo); a meaningful "level 1 complete" needs at minimum enemy firing back + player health (A.19), but the prerequisite for any of that being playable is breaking through the 4-5 FPS floor.
+
+### S14 wrap-up
+
+Single milestone, single iteration, zero fixes. ~250 LOC of new code touching 8 subsystems compiled clean first try. Total time ~1 h real-time (recon 5 min + impl 45 min + build/test/snap 10 min + wrap to follow). Inside the original S14 1.5-2 h budget by a wide margin.
+
+The "horror stare" gameplay artifact from A.16b is fully resolved: PRIMARY now fires, guards take damage, the 3-frame death animation plays, and the cadaver remains in the world correctly painter-sorted. Ammo and score on the HUD respond in real time. The unprompted user-spotted detail (HUD ammo turning red on zero) is a small confirmation that the care put into the digit-font / gamepal-aware color system in A.15 paid off.
+
+The `g_zbuffer[VIEW_W/2]` shortcut for the wall-vs-bullet occlusion is the kind of design choice that's only possible because the renderer was structured well from A.13: instead of duplicating geometry queries between rendering and combat, the same data structure serves both. Pattern worth carrying forward — A.19 enemy-firing-back can use the same z-buffer to gate the AI shoot ray against player walls.
+
+Workflow rule re-confirmed: code + VIS_sessions.md + README.md + memory in the same commit.
+
+---

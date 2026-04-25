@@ -31,6 +31,7 @@ Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 | A.13.1 — Raycaster polish | Grid-line DDA + Tier-3 wall variety (32 pages, side-aware light/dark) + Watcom `-ox` discovery + time-scaled door anim + tight inner loops + partial-src StretchDIBits | ✅ |
 | A.16b — Enemy AI ticker | State machine (Stand/Walk) + 32 walking frames + LOS Bresenham + 8-dir snap chase + sub-tile movement + per-axis collision + time-scaled phase advance | ✅ |
 | A.17 — Weapon overlay | Vanilla SPR_PISTOLREADY blitted at viewport bottom-center, runtime chunk discovery (`total_sprites - 15`), 1:1 fixed-position blit via DrawSpriteFixed | ✅ |
+| A.18 — Firing + hitscan + damage | PRIMARY rebind (door → SECONDARY), 4-frame ATK animation (PISTOLATK1..4 hot-swap), hitscan via z-buffer + first-hit screen-span scan, damage 5..12 + 3-frame DIE → frozen DEAD, ammo + score HUD partial re-blit | ✅ |
 
 ## Repository layout
 
@@ -65,14 +66,14 @@ The following directories are git-ignored — they are either fetchable, regener
 
 ```bash
 cd src
-cmd /c ".\build_wolfvis_a17.bat"     # produces build/WOLFA17.EXE
-python mkiso_a17.py                  # produces build/wolfvis_a17.iso
+cmd /c ".\build_wolfvis_a18.bat"     # produces build/WOLFA18.EXE
+python mkiso_a18.py                  # produces build/wolfvis_a18.iso
 ```
 
 ### Run on MAME
 
 ```bash
-mame -rompath . vis -cdrom build/wolfvis_a17.iso -window -nomax -skip_gameinfo -nomouse
+mame -rompath . vis -cdrom build/wolfvis_a18.iso -window -nomax -skip_gameinfo -nomouse
 ```
 
 (Place `vis.zip` in the same `-rompath` directory.)

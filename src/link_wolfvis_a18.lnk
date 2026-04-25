@@ -1,0 +1,9 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA18.EXE
+FILE          ..\build\wolfvis_a18.obj
+OPTION        MAP=..\build\WOLFA18.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.18 firing+hitscan+damage (PRIMARY=fire, SECONDARY=door)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
