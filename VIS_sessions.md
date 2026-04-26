@@ -2265,3 +2265,126 @@ Recon-first track record stays at **11-for-11** for completed milestones (A.13..
 User pacing pattern S16: continued chaining across two milestones (A.19.2 commit + A.21 partial), accepting honest pivot to "save findings + close" when single-bit search exhausted. Confirmed: long-tail RE tasks need 3-5h continuous budget, not 1.5-2h.
 
 ---
+
+## Session 17 — 2026-04-26 — Milestone A.21 RECON COMPLETE: DispDib direct A000 unlocked
+
+### Scope
+
+Reopen A.21 from S16 partial. S16 proposed 3-5h continuous budget for "disasm path proper" or "2-bit combinatorial brute force". User reset assistant pacing expectations at session open ("non lasciamo strade intentate"). Pick: disasm path proper as primary, brute force 2-bit as fallback. Goal: identify BEGIN flag value + framebuffer access mechanism for direct video writes bypassing GDI.
+
+Non-task interlude: user asked about a Reddit comment claiming "Spacenuts" Tandy game tested "built-in Sound Blaster" — clarified as conflation (VIS YMF262 OPL3 IS the FM chip in SB Pro 2.0/SB16, but no Creative DSP at 0x220-0x22F). No project model change.
+
+### Recon: NE format archaeology (~30 min)
+
+Reparsing `reverse/dispdib_raw.bin` with proper NE format reading (Python + struct):
+
+- NE header at file 0x20. Linker version 5.20. Segment count 3, module ref count 3.
+- Segment table at file 0x60. **Trap**: sec_off field (`0x6d7`, `0x6df`, `0x6e7`) interpreted as file offsets gives overlapping segments — incoherent. Resolution: the sec_off values ARE meaningful but represent **runtime selector indices** in the loader-patched image, NOT file offsets.
+- Resident name table at file 0x78: `DISPDIB`→ord 0, `WEP`→ord 99 (S16 had this off-by-one as ord 194).
+- Entry table at file 0xa0: ord 1 (DisplayDib) MOVABLE → seg2:0x07D1, ord 2 (DisplayDibEx) MOVABLE → seg2:0x0802. Both via `INT 3F CD 3F` thunk.
+- Imp names: GDI, USER, KERNEL.
+- Non-resident name table at file 0xc0..0xfe (in-blob, NOT at 0x385ac0 as the NE header field claims — that field appears to be from the on-disk DLL layout, not the loaded image): "DISPLAYDIB"=ord 1, "DISPLAYDIBEX"=ord 2, module description "TVVGA (GRYPHON) DIB Display DLL".
+
+### Resolving the entry-table-mid-function anomaly (S16 trap S16.A.21.2)
+
+S16 disasm assumed seg2 starts at file 0x6df0. With that base, ord1 at seg2:0x7D1 = file 0x75c1 lands on `EB 06 8B 46 EA 89 46 F4` — not a Microsoft DLL prologue. S16 catalogued this as "lands mid-function on `eb 06 jmp` short-circuit" and deferred.
+
+S17 root cause: the extracted blob is a **loader-patched runtime image**. The seg_table sec_off field is a runtime-selector hint, not a file offset. Real seg2 starts at **file 0x154** (right after the non-resident name table). Once corrected:
+
+- seg2:0x7D1 = file 0x925: `b8 e7 06 45 55 8b ec 1e 8e d8 ...` = canonical Microsoft `__loadds` DLL prologue with DGROUP selector `0x06E7` patched in by loader (which is exactly the `sec_off` of seg3 in the segment table — confirms our reinterpretation).
+- seg2:0x802 = file 0x956: same prologue pattern.
+
+DisplayDib (file 0x925) and DisplayDibEx (file 0x956) are **tiny trampolines** (49 B and 68 B respectively). Both adapt their args and call DisplayDibCommon at file 0x154 (= seg2:0x000). DisplayDibEx OR's `0x20` into wFlag to mark "extras present" before forwarding.
+
+### Disasm of DisplayDibCommon
+
+Full disasm of the 1100-byte function with capstone (CS_MODE_16). Args layout via stack: `[BP+4]=wFlag` (low/high byte access), `[BP+6/8]=extras x/y`, `[BP+0xa..0xc]=lpBits FAR`, `[BP+0xe..0x10]=lpbi FAR`.
+
+wFlag bit table identified (with file offsets of the test instructions):
+
+| Bit | Meaning | Test loc | Confirmed |
+|---|---|---|---|
+| 0x0001..F | MODE field | 0x195 | mode 1 = 320x200x8 |
+| 0x0020 | "extras present" (DisplayDibEx internal) | 0x3f7 | — |
+| 0x0040 | skip task validation / NOPALETTE in END | 0x162, 0x8be | — |
+| 0x0080 | "use external lpBits vs DIB-packed" | 0x2a0 | — |
+| 0x0100 | **STRETCH 2X** (NOT NOWAIT) | 0x3ba | doubles dimensions; errors WIDE (6) if mode≥5 |
+| 0x4000 | **END** | 0x1c0 | calls helper 0x8a5 → restore |
+| 0x8000 | **BEGIN** | 0x18d | calls helper 0x818 → mode-set, exit no render |
+
+**Critical S16 correction**: S16 attributed `0x0100` to NOWAIT based on "call returned immediately + gradient flashed 1 frame". Disasm reveals 0x0100 = STRETCH 2X. The "return immediately" was actually error-exit on dimension overflow (320-byte-wide source × 2 = 640 > 320 viewport → error 8 → exit). Coincidental signature with NOWAIT; misleading.
+
+Helper 0x818 (BEGIN handler): calls 0x5b7 (reads bmi globals: biBitCount→[0x5fa], biCompression→[0x5f6/8]), then if no error calls 0x736 (mode-set core). Returns. **No render.**
+
+Helper 0x8a5 (END handler): tests `wFlag & 0x0400` (skip flag); decrements `[0x44e]` (mode depth counter); if 0, optionally restores palette (skip if `wFlag & 0x40`), then far-calls KERNEL/GDI for desktop restoration.
+
+### Empirical iteration loop (5 iters, ~35 min total)
+
+S17 attack plan: 4 builds of `dispdib_test.c` to lock down the BEGIN-write-END flow.
+
+**Iter 1 — `BEGIN | MODE | NOCENTER, &bmi, NULL` + `AllocSelector + SetSelectorBase(0xA0000)` + checkerboard**:
+User: "Niente checkerboard, solo beep grave, poi tutto nero (SENZA cursore) per qualche secondo, poi beep acuto con riapparizione cursore". **BEGIN=0x8000 confirmed** (cursor disappears = mode change, END restores). Direct A000 via AllocSelector failed silently — VIS doesn't expose video memory at physical 0xA0000 via standard selector base mapping.
+
+**Recon pivot — programmer's_ref.txt:3132 reread**: `extern WORD _A000h: // selector for video memory` exported by Windows Kernel module. The doc snippet `lpA000 = (LPVOID) MAKELONG(0L, &_A000h)` is the official idiom (initially read as a doc bug). BIOS ROM grep: `__A000H` (DOUBLE underscore) found at p513bk0b.bin offset 0x8432 with ord 0xAE = 174.
+
+**Iter 2 — added `extern WORD _A000h` + `IMPORT _A000h KERNEL._A000H`**:
+User: "uscito subito". App failed to load — import name mismatch (`_A000h` ≠ `__A000H`). Single-underscore variant doesn't exist in KERNEL exports.
+
+**Iter 3 — fixed import to `IMPORT __A000H KERNEL.__A000H`, split test using interp A (`(BYTE __far *)&_A000H`) for top half + interp B (`MK_FP(_A000H, 0)`) for bottom half**:
+User: "Peggio di prima: beep grave, poi cursore sparisce e non torna più (niente beep acuto)". HANG. Diagnosis: interp A wrote to `(KERNEL_seg : selector_value_as_offset)` = corruption of KERNEL data segment at offset = the selector value. With sel ≥ 0x1000, this clobbered KERNEL globals → silent hang. VIS has no GPF dialog.
+
+**Iter 4 — diagnostic-first probe + interp B with single-byte write**:
+User: "4 pip diagnostici prima di beep grave". `_A000H` value (interpreted as variable contents) is ≥ 0x1000. Then probable hang at `fb[0] = 0xFE` via `MK_FP(_A000H, 0)` — interp B wrote at `(garbage_value : 0)` since the bytes at `KERNEL_seg : selector_value` are random data, not a valid selector.
+
+**Insight after iter 4**: the doc snippet `MAKELONG(0L, &_A000h)` works as follows. KERNEL exports `__A000H` as a CONSTANT entry whose entry-table offset field is patched at boot to the runtime selector value. The C-side `&_A000H` returns a far pointer `(KERNEL_seg : selector_value)`. The OFFSET part of that far ptr IS the selector itself. So:
+
+```c
+WORD sel = (WORD)((DWORD)(LPVOID)&_A000H);   /* take low WORD of far ptr = offset = selector */
+BYTE __far *fb = (BYTE __far *)(((DWORD)sel) << 16);
+```
+
+**Iter 5 — interp C (offset-of-symbol = selector value)**:
+User: "Tutto preciso come descrivi tu!! TRE pip diagnostici! Poi sequenza esatta con checkerboard!". **A.21 OPEN.** End-to-end flow:
+- 3 diagnostic pips (sel in [0x100..0x1000) — valid LDT entry range)
+- low beep
+- BEGIN call → cursor disappears + 320x200x8 mode persistent
+- single-byte write probe → alive pip
+- full checker via direct A000 → visible 2.5s
+- END call → desktop restored
+- high beep + cursor back
+
+### Concrete results
+
+- `src/dispdib_test_a21_proven.c` — frozen baseline of working iter 5 (preserved alongside `src/dispdib_test.c` working copy).
+- `src/link_dispdib_test_a21_proven.lnk` — its .lnk with `IMPORT __A000H KERNEL.__A000H`.
+- `build/DDTEST.EXE` — 2276 B.
+- `build/ddtest.iso` — 59 KB.
+- Memory: NEW `project_dispdib_unlocked.md`, NEW `reference_dispdib_disasm_flags.md`, NEW `reference_a000h_idiom.md`. DELETED `project_dispdib_parked.md`, `reference_dispdib_empirical_flags.md` (superseded).
+
+### Trap / Gotcha / Eureka (S17)
+
+- **Eureka S17.A.21.E1 — segment table sec_off can lie in extracted/runtime images.** When extracting a Win16 NE module from a ROM image where the loader has already done DGROUP fixups and segment placement, the segment-table file-offset field may not match the actual position in the extracted blob. Verify by checking what's at the nominal sec_off vs scanning for known prologue patterns. The real seg base is whichever offset makes `entry_offset → prologue_byte_position` math work.
+- **Eureka S17.A.21.E2 — recon-first turbo loop**: 1 disasm session (~45 min) replaced what S16 estimated at 3-5 h of brute-force search. The disasm gave us not just BEGIN/END values but the FULL flag semantics, including correcting S16's NOWAIT misattribution. Recon-first now 12-for-12.
+- **Eureka S17.A.21.E3 — `&_A000H` is NOT what you'd expect.** The Win16 KERNEL magic-constant export idiom uses the OFFSET field of the entry-table entry to encode the selector value (patched at boot). C-side `&_A000H` returns `(KERNEL_seg : selector)`, and you have to extract the offset (low WORD of the far ptr cast to DWORD) to get the selector. Three wrong interpretations had to be falsified before the right one emerged. Wrong interpretations hang VIS silently — no GPF dialog, no auto-restart.
+- **Trap S17.A.21.1 — silent hang from KERNEL data corruption.** Iter 3 wrote to `(KERNEL_seg : selector_offset)` = inside KERNEL's data segment. No fault. Pure freeze. VIS protected mode allows arbitrary writes within accessible segments without trapping. Lesson: when probing unknown selector idioms, write ONE byte first and beep "alive" before continuing. Iter 4 adopted this.
+- **Trap S17.A.21.2 — Watcom name decoration** for `extern WORD _A000H` (single underscore in C) → linker symbol `__A000H` (Watcom prepends `_`). For `extern WORD __A000H` (double underscore in C) → linker symbol `___A000H` (triple). To match KERNEL's export name `__A000H`, declare with single underscore in C. This is consistent with Watcom's default cdecl name decoration for globals.
+- **Trap S17.A.21.3 — empirical signal interpretation** (S16 NOWAIT=0x0100): a behavioral signature ("returned immediately") can have multiple causes. S16 attributed it to NOWAIT semantics. Disasm revealed it was actually error-exit from dimension overflow when STRETCH 2X doubled the source dimensions past viewport. Always look for the code path, not just the timing. Recon-first specifically prevents this kind of false attribution.
+
+### Time invested
+
+S17 total ~1.5 h real (disasm 45 min + 5 empirical iters @ ~10 min each + memory writeup ~15 min). User pacing memo at session open was load-bearing — assistant's S16 initial estimate "3-5 h continuous" was inflated 2-3×. Real recon path was discrete and bounded once the seg-base bug was caught.
+
+### Next-step candidates for S17 cont. or S18
+
+Per agreed plan A→B:
+1. **A.21 wolfvis port (was task B in S17 plan)**: replace per-frame `StretchDIBits + SelectPalette/RealizePalette` with one-time DispDib(BEGIN) at startup, direct `_fmemcpy(fb, framebuf, 64000)` per frame, DispDib(END) at WM_CLOSE. Projected 30-50% perf gain. Builds on the proven test pattern in `dispdib_test_a21_proven.c`.
+2. **A.20 enemy firing back + player health** (gameplay loop closure, deferred from S15). Independent of perf.
+3. **A.19.3 split telemetry** (PIT-direct sub-counters). Now even more informative because A.21 perf delta will be the next big unknown.
+
+### S17 wrap (so far)
+
+A.21 recon full closure: from "single-bit search exhausted, BEGIN unknown" at S16 close to "full bit table + working direct-A000 reference impl" at S17 close. Recon-first 12-for-12 streak preserved (the disasm did all the work; empirical iters were just to validate the magic-constant idiom interpretation, which the doc snippet stated correctly but cryptically).
+
+User reaction at iter 5: "Tutto preciso come descrivi tu!! TRE pip diagnostici! Poi sequenza esatta con checkerboard!". User pacing memo continues to apply: assistant did not pre-emptively pivot away from the iterative loop, even after iter 3 hang appeared catastrophic. Each iter added one new piece of information; cumulative narrowed the idiom space from 3 hypotheses to 1 in 4 builds.
+
+---
