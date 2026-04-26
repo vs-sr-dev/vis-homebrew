@@ -1,5 +1,6 @@
-# Toolchain (script-fetchable, ~537 MB)
-tools/
+# Toolchain (script-fetchable, ~537 MB) — exclude its contents but keep audit scripts under tools/
+tools/OW/
+tools/sfx_dump/
 
 # Copyright Tandy/Memorex — retail discs, BIOS, and validation file
 isos/
@@ -30,10 +31,11 @@ nvram/
 snap/
 src/snap/
 
-# Build leftovers in src/ (Watcom intermediate)
+# Build leftovers in src/ (Watcom intermediate + error logs)
 *.obj
 *.exe
 *.com
+*.err
 
 # Python
 *.pyc

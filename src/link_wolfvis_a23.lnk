@@ -1,0 +1,11 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA23.EXE
+FILE          ..\build\wolfvis_a23.obj
+OPTION        MAP=..\build\WOLFA23.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.23 SFX (AdLib OPL3 ch0 SFX subsystem + 8 trigger points)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
+IMPORT        DisplayDib     DISPDIB.DISPLAYDIB
+IMPORT        __A000H        KERNEL.__A000H

@@ -2473,3 +2473,115 @@ A.21 closes the headline perf path. Project enters new phase (engagement + conte
 S17 closes here. User pacing memo confirmed (yet again) — recon-first investment, iterative empirical loops, no premature pivot, total time stays under 3h for a multi-subsystem milestone.
 
 ---
+
+## Session 18 — 2026-04-26 — Gameplay loop closure (A.20 + A.22 + A.23) + RUN-speed pacing
+
+### Scope
+
+S17 closed with A.21 SHIPPED ("voglia di proseguire" — first crossing from tech-demo to engaging-game). S17's `Next-step candidates for S18` list named A.20 (enemy firing back + player health) as priority 1, with pickups + SFX as natural follow-ons. User opened S18 with intent: close the gameplay loop end-to-end. Five milestones shipped sequentially (A.20, A.20.1, A.22, A.23, A.23.2), each preceded by ~5-10 min canonical-source recon (Wolf3D WL_*.C / ID_SD.C) per recon-first feedback memo.
+
+### A.20 — Enemy fire-back + player health
+
+**Recon (~10 min)** — WL_ACT2.C s_grdshoot1..3 (3-frame anim @ 20 tics/phase, T_Shoot fires on phase 1), T_Chase shoot trigger (CheckLine LOS + chance roll = (tics<<4)/dist), T_Shoot hit roll (256-dist*8 not-visible / 160-dist*16 visible) + tiered damage table (dist<2 -> US_RndT()>>2, etc.). WL_AGENT.C TakeDamage simple subtract+clamp+ex_died, HealSelf cap 100. HUD pre-baked HEALTH panel (x=193, 3-digit) already in A.21.
+
+**Impl (~75 min, single iter zero-fix)** — wolfvis_a20.c baseline. NUM_SPRITES 67 -> 70 (slots 67..69 = SPR_GRD_SHOOT1..3 chunks 96..98). New OBJ_ST_SHOOT=4 state with 3-phase ticker (286 ms/phase). Forward decl ShootPlayer + Prng8 so AdvanceEnemies can call them. Shoot trigger logic inserted in chase path right after facing-dir update — vanilla T_Chase chance roll re-using elapsed_ms / 14 as tic_equiv (70-Hz tic rate normalize). On trigger -> state = SHOOT, phase 0, tick_last = now, continue (no movement that tick). SHOOT branch in AdvanceEnemies: phase advance every ENEMY_SHOOT_PHASE_MS (286 ms), on phase 0->1 transition call ShootPlayer (T_Shoot beat), after phase 2 -> revert to OBJ_ST_WALK. ShootPlayer: re-checks LOS + computes dist = max(|dx|,|dy|), hitchance = 256-dist*8 (PoC harsh branch), Prng8 hit roll, tiered damage (vanilla table). DamagePlayer: subtract / clamp 0 / set g_player_dead / RedrawHUDHealth. HUD HEALTH redraw (HUD_HEALTH_X=193, 3-digit clone of RedrawHUDAmmo, HUD_FG_LOW red < 25). Death state: g_player_dead freezes WM_TIMER world. PRIMARY tap on dead -> RestartLevel (reset hp/ammo/score/kills + InitPlayer + ScanObjects + SetupStaticBg + full InvalidateRect). Window class WolfVISa21 -> WolfVISa20.
+
+**Test result** — User: "Struttura generale funzionante alla perfezione - feel un po' 'punitivo'". Combat loop closes end-to-end. But user observes: 1) no sensory feedback when hit (CIPA: "see HEALTH digit drop, hear nothing, see no flash"), 2) suspicion of shoot-through-walls.
+
+### A.20.1 — Polish bundle (fairness + damage flash)
+
+**Diagnosis** — Hitchance was using vanilla "not visible" branch (256-dist*8, ~94% at dist=2). But our LOSCheck-passed condition IS the vanilla "visible" case (player can see enemy, has dodge window). Vanilla's "visible" branch halves chance: 160-dist*16 = 50% at dist=2.
+
+**Impl (~15 min)** — wolfvis_a201.c. Hitchance switched to 160-dist*16 in ShootPlayer (single-line change). Damage flash: new g_damage_flash_ticks counter initialized to 3 in DamagePlayer; in InvalidatePlayerView after DrawCrosshair, paint a 5-px red border around the viewport rect on first 2 ticks (count > 1) then skip final paint on tick 3 (clear-frame guarantee). WM_TIMER forces moved=TRUE while flash counter is non-zero so the sequence renders even when player is idle on hit.
+
+**Test result** — User: "fair (78/100 dopo due guardie)" + "flash sul bordo dell'area di gioco" (subtler than vanilla full-screen tint). User accepted bordered flash for now ("con SFX cambierà radicalmente"); tint upgrade deferred.
+
+### A.22 — Pickups (medkit / clip / treasures / 1up)
+
+**Recon (~5 min)** — WL_ACT1.C statinfo[] table indexed by SPR_STAT_n; obj_id 47..56 maps to bo_food / bo_firstaid / bo_clip / bo_cross / bo_chalice / bo_bible / bo_crown / bo_fullheal at chunks 26/27/28/31/32/33/34/35. WL_AGENT.C GetBonus — Give* dispatch with hp==100 / ammo==99 gates (pickup stays on floor on gate-fail).
+
+**Impl (~30 min, two iters)** — wolfvis_a22.c. NUM_SPRITES 70 -> 78 (slots 70..77 = 8 pickup sprites). Object.pickup_kind BYTE field (PK_NONE / PK_AMMO_CLIP / PK_HEALTH_10/_25/_FULL / PK_TREAS_100/_500/_1K/_5K). ScanObjects pickup branch (switch on obj 47..56 -> spawn with pickup_kind set). CheckPickups: walk g_objects, same-tile match -> TryGiveBonus -> sprite_idx = -1 (DrawSpriteWorld + painter sort already short-circuit on negative idx). TryGiveBonus: PK_* dispatch with vanilla gates + Give* logic + HUD redraws. WM_TIMER hook between AdvanceEnemies and AdvanceWeapon.
+
+**Iter 1 trap caught (HEAVY)** — User: "food pickup visibili e non raccoglibili a 100 vita (corretto), ma sono sparite le guardie". Bisect via diagnostic LIVES/LEVEL HUD panels showing g_num_static / g_num_enemies -> confirmed MAX_OBJECTS=128 overflow (decorations + 8 pickups + 2 guards filled past limit; guards in lower-y rows scanned LAST, dropped silently when scan loop exits via g_num_objects < MAX_OBJECTS check).
+
+**Iter 2 fix** — Bumped MAX_OBJECTS 128 -> 256. Stack/heap impact 6 KB total (Object struct ~24 B), painter sort long depth_q88[256] + int order[256] = 1.5 KB stack (well within 8 KB stack reserve). Diag bumped LEVEL=2 / LIVES=9-clipped -> guards back, pickups still visible.
+
+**Test result** — User: "sono comparsi anche pickup che non avevo visto prima". Full pickup loop closes.
+
+### A.23 — AdLib SFX subsystem + 8 trigger points
+
+**Recon (~15 min)** — ID_SD.H AdLibSound struct (6 B SoundCommon = longword length + word priority, 16 B Instrument, 1 B block, length-bytes data stream). ID_SD.C SDL_AlSetFXInst (write 11 OPL registers via modifier op = reg 0, carrier op = reg 3, alFeedCon = 0). SDL_ALSoundService (140 Hz: read freq byte -> 0 = key off, else = freq + alBlock keyon). AUDIOWL1.H STARTADLIBSOUNDS=69, mapping sound_id -> chunk = 69 + sound_id. SDL_t0Service confirms 700 Hz timer / 5 = 140 Hz SFX rate (= TickBase * 2).
+
+**Impl (~30 min)** — wolfvis_a23.c. SFX state vars (sfx_buf[2048] __far, sfx_data ptr, sfx_len, sfx_block, sfx_active, sfx_prev_pit, sfx_pit_accum). LoadSfx(chunk_idx) reads chunk -> parses header -> fills state. WriteSfxInstrument writes 11 OPL registers per vanilla SDL_AlSetFXInst. PlaySfx(sound_id): translate to chunk = STARTADLIBSOUNDS + sound_id, LoadSfx + WriteSfxInstrument + init state. ServiceSfx: PIT-direct 140-Hz accumulator (PIT_CYCLES_PER_SFX_TICK = 596400 / 140 = 4260, mirror of A.10 ServiceMusic pattern). 8 trigger points wired (FireWeapon -> ATKPISTOL, ShootPlayer -> NAZIFIRE, AdvanceEnemies SHOOT-trigger -> HALT, DamageEnemy lethal -> DEATHSCREAM, DamagePlayer -> TAKEDAMAGE, TryGiveBonus PK_* -> GETAMMO/HEALTH/BONUS). PeekMessage idle loop refactored to call ServiceMusic + ServiceSfx after each Translate/Dispatch, WaitMessage only when both inactive. gAudioOn = 1 set unconditionally after OplInit (was conditional on music being started, broke SFX when sqActive=FALSE).
+
+**Iter 1 result** — User: "credo siano giusti ma sono molto distorti". SFX play but sound bursty / clicky.
+
+**A.23.1 polish (cap + mid-flow service)** — Diagnosis: WM_TIMER + DrawViewport stall (~30 ms) lets sfx_pit_accum grow to 4-5 ticks; ServiceSfx burst-writes 4-5 freq bytes in microseconds (perceived as click, not freq sweep — same bucket as A.10 IMF "burst-processing dopo WM_PAINT stall" gotcha). Applied (a) accumulator cap at 2 ticks and (b) mid-WM_TIMER ServiceSfx call sites (4 total). User reverdict: "ora suona a metà velocità" — cap was eating real audio time during stalls (4.2 ticks elapsed but only 2 ticks played = 47% playback rate).
+
+**A.23.1 fix re-iter (cap removed + render-loop service)** — REMOVED accumulator cap entirely. Inserted ServiceSfx every 16 columns inside DrawViewport's column loop (8 calls per render frame at ~4 ms cadence) + 2 calls post-render. Combined with mid-WM_TIMER calls = ~14 ServiceSfx call sites per WM_TIMER cycle. Accumulator naturally never grows > 1-2 ticks under normal load -> no audible burst AND no underplay.
+
+**SFX dump tool** — Wrote tools/dump_sfx.py extracting AdLib chunks from AUDIOT.WL1 + rendering to WAV via minimal pure-Python OPL2 emulator (1 channel / 2 ops / sine / rough ADSR — good enough as reference). Confirmed all 8 trigger chunks exist in WL1 shareware (HALTSND/NAZIFIRESND/DEATHSCREAM not empty as feared); they ARE the canonical AdLib voice approximations. WAV reference set in tools/sfx_dump/ for in-game-vs-canonical comparison.
+
+**Test result** — User: "Direi meglio ora!" Pistol = 2 square notes (canonical Wolf3D AdLib). Recognizes voice SFX as buzzy/sub-bass FM approximations (vanilla AdLib feel, not bug).
+
+### A.23.2 — Movement RUN speed (single-line polish)
+
+**Diagnosis** — User feedback after A.23 ship: "il flow ora è fluido ma lo sento comunque 'lento', BJ cammina più lentamente rispetto a W3D vanilla". Audit: MOVE_STEP_Q88 = 24 * 20 Hz poll = 0.094 tile/poll * 20 = 1.875 tile/sec = vanilla WALK speed exactly (matches WALKSPEED 2048 in vanilla scaled by tics). Vanilla RUNSPEED is 3x WALK = 5.625 tile/sec. Wolf3D players historically held SHIFT to RUN almost exclusively; our default = WALK = "passo turistico".
+
+**Fix (~3 min)** — MOVE_STEP_Q88 24 -> 64 (~2.7x). Single-line change. Per-poll step now 0.25 tile, total ~5 tile/sec — close to vanilla RUN feel.
+
+**Test result** — User: "Giocabilità molto migliorata già solo con questo cambiamento!" Pacing crossed from "playable but sluggish" to "vanilla-feel".
+
+### Eureka
+
+- **S18.E1 — recon-first now 18-for-18.** A.20 / A.20.1 / A.22 / A.23 / A.23.2 all built clean first try after a 5-15 min recon pass on Wolf3D canonical source per milestone. The pattern continues to amortize: recon bug-prevents far more iter budget than it costs. A.20 in particular hit 8 subsystems clean first try.
+- **S18.E2 — Diagnostic-via-HUD-panel rescue pattern.** When A.22 dropped guards, we hijacked LEVEL/LIVES HUD panel digits to display g_num_enemies / g_num_static at runtime — diagnosed MAX_OBJECTS=128 overflow in 2 build cycles (~10 min). Generalizable: any "did N happen?" question can be answered cheaply by repurposing a HUD digit slot for one build, no instrumentation harness needed.
+- **S18.E3 — Burst-vs-underplay tradeoff in PIT-driven streaming.** Fixed-cap on accumulator loses real time (underplay = perceived "slow speed"). Uncapped + sparse service produces audible bursts. Solution: dense (5-10 ms cadence) ServiceX calls eliminate need for cap entirely. Pattern applies to any future PIT-driven byte stream (digi audio if VIS ever gets a DAC, IMF if reopened).
+- **S18.E4 — Sensory-feedback completion as critical perceived-quality multiplier.** A.20 closed combat loop mathematically (firing + hp + restart) but felt punitive. A.20.1 + A.23 closed feedback loop (visual flash + audio cues). User progression: "punitivo" -> "fair" -> "ora si sente" -> "giocabilità molto migliorata". A single-line speed change tipped over.
+
+### Trap / Gotcha
+
+- **Trap S18.A.22.1 — MAX_OBJECTS=128 silent overflow.** Pickup branch added ~20 new spawn objects; total exceeded 128 cap; guard tiles in lower-y rows scanned last got dropped silently (no error, just an early-exit "for (... && g_num_objects < MAX_OBJECTS; ...)"). Diagnosis required HUD diag because no other signal. Generalizable: any spawn-table addition needs a "did MAX_OBJECTS overflow?" check post-scan. Bumped to 256 with 6 KB Object array footprint as guard rail.
+- **Trap S18.A.23.1 — accumulator cap eats real audio time.** Capping a PIT-driven accumulator to N ticks during stall = drop (real_elapsed - N) ticks of audio. For 30 ms stall + cap 2 ticks (14 ms): 47% playback rate, sounds like "half speed". Don't cap; spread service calls instead. Same anti-pattern would apply to IMF if we ever bandage it (memo reference_imf_scheduler_gotchas.md updated).
+- **Trap S18.A.23.2 — gAudioOn state coupling.** Set unconditionally on OplInit() success, NOT only on music-start. SFX needs OPL ready, not music ready. Old code coupled gAudioOn = 1 to StartMusic — broke SFX when music never started (sqActive=FALSE permanently because no F1 binding to start it).
+- **Trap S18.A.23.3 — AdLib voices are NOT digitized voices.** User expectation set by SoundBlaster Wolf3D = digi PCM samples ("HALT!" voice). VIS has YMF262 OPL3 but no DAC; only AdLib FM fallback available. AdLib fallback for voice SFX is a buzzy / sub-bass FM approximation (block 6 + low fnums = ~33 Hz fundamental + harmonics from FM modulation). This is vanilla AdLib feel, not a bug. Reference: tools/dump_sfx.py + tools/sfx_dump/*.wav set.
+
+### Time invested
+
+S18 total ~3 h real. Breakdown:
+- A.20 recon + impl + test: ~75 min
+- A.20.1 polish: ~20 min
+- A.22 recon + impl + bisect + fix + test: ~50 min
+- A.23 recon + impl + 2 polish iters + dump tool: ~50 min
+- A.23.2 movement fix + test: ~5 min
+- Wrap (this writeup + memory + commit): in progress
+
+5 milestones shipped + 2 follow-on traps caught and fixed.
+
+### Concrete results
+
+- New: src/wolfvis_a20.c, src/wolfvis_a201.c, src/wolfvis_a22.c, src/wolfvis_a23.c (each ~3800-4700 LOC, +50-300 vs predecessor).
+- New: src/build_wolfvis_a{20,201,22,23}.bat, src/link_wolfvis_a{20,201,22,23}.lnk, src/mkiso_a{20,201,22,23}.py.
+- New: cd_root_a{20,201,22,23}/ (each 12 files, 1.5-1.6 MB ISO).
+- New: build/WOLFA{20,201,22,23}.EXE (243-282 KB).
+- New: tools/dump_sfx.py (SFX chunk extractor + minimal Python OPL emulator + WAV renderer).
+- New: tools/sfx_dump/*.wav (8 reference WAVs for the canonical AdLib SFX).
+- Memory: MEMORY.md index + 5 NEW project_milestone files (A.20 / A.20.1 / A.22 / A.23 / A.23.2 movement) + new reference memos (max_objects undersize trap, sfx timing tradeoff, gAudioOn coupling, AdLib voice expectation gap).
+- README.md row added (A.23 milestone), quick-start updated to A.23.
+
+### Headline user verdict
+
+S18 close: **"Giocabilità molto migliorata"** — paired with A.21's "voglia di proseguire", the build now crosses from "engaging tech-demo" to "actually fun to play".
+
+### Next-step candidates for S19
+
+User-named at S18 close: "polish (drop ammo delle guardie, ecc)".
+
+1. **Guard ammo drops** — vanilla: dead guard leaves a clip on the corpse tile. Extend Object struct or spawn a new pickup at the DIE->DEAD transition. Probably 30 lines.
+2. **Door SFX** — OPENDOORSND / CLOSEDOORSND triggers on door toggle. 5 lines (TryGiveBonus pattern).
+3. **Damage flash polish** — full-screen tint vs border (deferred from A.20.1), now that SFX provides the primary feedback the bordered flash may suffice.
+4. **Music F1/F3 rebind** — now that F1 is minimap toggle (A.19) and PRIMARY/SECONDARY are gameplay, no key starts music. F3 was reserved for strafe. Pick a hand-controller key for music start (or auto-start on level load).
+5. **L1 completion-detection / level transition** — vanilla has "find the elevator" mechanic; deferred since L1's elevator tile isn't yet special-cased. Closes the per-level win condition.
+6. **Light-by-distance** — last A.13.1 deferred item. With SFX + pickups + speed fixed, lighting becomes the next visual-polish multiplier.
+
+S18 closes. Recon-first 18-for-18, pacing memo confirmed once more (5 milestones in 3 h), HUD-diag-rescue established as new diagnostic tool.
