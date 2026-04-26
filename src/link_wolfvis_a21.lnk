@@ -1,0 +1,11 @@
+SYSTEM        windows
+NAME          ..\build\WOLFA21.EXE
+FILE          ..\build\wolfvis_a21.obj
+OPTION        MAP=..\build\WOLFA21.MAP
+OPTION        QUIET
+OPTION        DESCRIPTION 'WolfVIS A.21 direct A000 framebuffer (DispDib BEGIN/END + __A000H)'
+OPTION        STACK=8192
+OPTION        HEAPSIZE=8192
+IMPORT        hcGetCursorPos HC.HCGETCURSORPOS
+IMPORT        DisplayDib     DISPDIB.DISPLAYDIB
+IMPORT        __A000H        KERNEL.__A000H

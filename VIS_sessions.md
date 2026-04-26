@@ -2388,3 +2388,88 @@ A.21 recon full closure: from "single-bit search exhausted, BEGIN unknown" at S1
 User reaction at iter 5: "Tutto preciso come descrivi tu!! TRE pip diagnostici! Poi sequenza esatta con checkerboard!". User pacing memo continues to apply: assistant did not pre-emptively pivot away from the iterative loop, even after iter 3 hang appeared catastrophic. Each iter added one new piece of information; cumulative narrowed the idiom space from 3 hypotheses to 1 in 4 builds.
 
 ---
+
+## Session 17 (cont.) — 2026-04-26 — Milestone A.21 SHIPPED: wolfvis port + post-port polish
+
+### Scope
+
+Plan-A→B continuation after the recon commit. Port the proven `dispdib_test_a21_proven.c` flow to the WolfVis renderer: replace per-frame `StretchDIBits + Select/RealizePalette` with one-time DispDib BEGIN at startup + per-frame direct write to `__A000H` selector + DispDib END at WM_QUIT. Goal projected: 30-50% perf gain over A.19.2.
+
+### Implementation (~25 min)
+
+Single source file `src/wolfvis_a21.c` (~3760 LOC, +50 vs A.19.2 baseline). Targeted edits, blast radius limited to the blit/palette path:
+
+1. **Add KERNEL extern + DispDib forward decl** near framebuf declaration:
+   ```c
+   extern WORD _A000H;       /* C source single underscore -> linker symbol __A000H */
+   static BYTE __far *g_fb_a000 = NULL;
+   static BOOL  g_dva_active   = FALSE;
+   WORD FAR PASCAL DisplayDib(LPBITMAPINFO, LPSTR, WORD);
+   #define DD_BEGIN 0x8000
+   #define DD_END   0x4000
+   #define DD_MODE_320x200x8 0x0001
+   #define DD_NOPAL_OR_TASK  0x0040
+   ```
+
+2. **Add `FlushFramebufToA000(dy0, dh)` helper** — copies `framebuf` to `g_fb_a000` with the bottom-up flip the renderer assumes (framebuf row 0 = bottom of screen, A000:0000 row 0 = top). Per-row `_fmemcpy(SCR_W bytes)` = `REP MOVSW` ≈ 640 cyc/row × 200 rows ≈ 11 ms full screen vs ~40-60 ms StretchDIBits.
+
+3. **Replace WM_PAINT body** — keep `BeginPaint`/`EndPaint` so Windows clears its dirty-region tracking, drop the `StretchDIBits + SelectPalette + RealizePalette + bottom-up src mirror math`, replace with `FlushFramebufToA000(ps.rcPaint.top, ps.rcPaint.bottom - ps.rcPaint.top)`.
+
+4. **Drop GDI palette handlers** — `WM_QUERYNEWPALETTE`, `WM_PALETTECHANGED`, the `WM_CREATE` `SelectPalette + RealizePalette` block. None apply once we own the video mode via DispDib BEGIN.
+
+5. **WinMain BEGIN/END framing**:
+   - After `CreateWindow + ShowCursor(FALSE) + ShowWindow + UpdateWindow + SetFocus + SetActiveWindow`: call `DisplayDib(&bmi, NULL, DD_BEGIN | DD_MODE_320x200x8 | DD_NOPAL_OR_TASK)`. On success (return 0), extract sel via the `(WORD)((DWORD)(LPVOID)&_A000H)` idiom (offset-of-symbol = selector), set `g_fb_a000` and `g_dva_active = TRUE`. Force one full-screen flush so the first frame appears without waiting for any movement-driven `InvalidateRect`.
+   - On `WM_QUIT` exit path: if `g_dva_active`, call `DisplayDib(&bmi, NULL, DD_END | DD_MODE_320x200x8 | DD_NOPAL_OR_TASK)` to restore the desktop cleanly. Then `return msg.wParam`.
+
+6. **Window class** `WolfVISa192` → `WolfVISa21`.
+
+7. **Build/link/iso/cd_root** cloned from A.19.2 set with three additions to `link_wolfvis_a21.lnk`: `IMPORT DisplayDib DISPDIB.DISPLAYDIB` + `IMPORT __A000H KERNEL.__A000H` (the existing `IMPORT hcGetCursorPos HC.HCGETCURSORPOS` stays). cd_root_a21 cloned with `SYSTEM.INI shell=a:\WOLFA21.EXE`.
+
+Single iter, one trivial fix (W131 warning: added `<string.h>` for `_fmemcpy` prototype). EXE 229,774 B (+38 B vs A.19.2 — accumulator state + extern + DVA conditional).
+
+### Result (raw)
+
+User test: "Funziona e direi molto bene, fai tu i conti veri, conto 7-8 (nei casi migliori anche 9 forse) frame a ogni heartbeat (a ogni cambio colore da bianco a rosso o da rosso a bianco dell'heartbeat)".
+
+Heartbeat = `tick_count` toggle every 500 ms (`MOVE_POLL_MS=50` × `DEBUG_BAR_TICKS_INTERVAL=10`). 7-9 frames per 500 ms = **14-18 FPS**, vs A.19.2 baseline of 7-8 FPS. **2× speedup, frame time roughly halved**. The dominant pre-A.21 cost was GDI StretchDIBits + palette overhead, NOT raycaster — eliminating those alone bought us ~70 ms/frame. Projection (30-50%) was beaten by ~2×.
+
+### Post-port polish (2 mini-iters, ~15 min)
+
+User noticed two residual issues:
+
+**Iter 1 — "freeze percepibile a ogni heartbeat - se eliminiamo quello siamo sostanzialmente shippabili"**: localized via interval bump (10 → 30, freeze followed → it IS the heartbeat work). Removed the entire DrawDebugBar pipeline: dropped the `tick_count++ + GetFocus + DrawDebugBar + InvalidateRect` block from WM_TIMER, removed the setup-time `DrawDebugBar()` call from `SetupStaticBg`. The bar no longer appears, the freeze is gone, the top 30 rows of viewport are now usable for actual game content. Likely cause of the freeze: the debug bar's full-width `InvalidateRect(0..320 × 0..30)` was getting merged by Windows GDI region with `InvalidatePlayerView`'s viewport rect into a near-full-screen dirty region, forcing a ~64 KB flush every heartbeat instead of two smaller separate flushes. Function definitions (DrawDebugBar, FB_FillRect helpers used by it) left in source — zero runtime cost when uncalled, can be re-enabled by uncommenting one line if needed for future debugging.
+
+**Iter 2 — "spam del tasto Fire causa un forte drop, anche a zero munizioni"**: A.18 had `FireWeapon` returning void — the WM_KEYDOWN handler set `moved = TRUE` regardless of whether the shot fired or was rejected (out-of-ammo / mid-animation). Each rejected tap then triggered `InvalidatePlayerView` → full `DrawViewport` (~50 ms) for nothing. Spam = N×50 ms wasted. Fix: `FireWeapon` now returns BOOL (TRUE iff shot accepted), WM_KEYDOWN does `if (FireWeapon(hWnd)) moved = TRUE;`. Spam-at-zero-ammo and spam-mid-animation are now ~free. Also matches vanilla Wolf3D semantics (single-shot per press, no auto-fire).
+
+### Trap / Gotcha / Eureka (S17 cont.)
+
+- **Eureka S17.A.21.E4 — projection vs reality**: projected 30-50%, actual ~2×. The StretchDIBits + Select/RealizePalette path on MAME-VIS was even more expensive than the closest-baseline analysis (A.19 freeing 25-30 ms by removing one minimap blit) suggested. Reason: per-frame DIB_PAL_COLORS realization + bottom-up src scan + GDI region tracking. All three eliminated by direct A000.
+- **Eureka S17.A.21.E5 — "voglia di proseguire" is the perceptual milestone marker that trumps any numeric metric**. User: "è anche la prima volta che ho avuto voglia di proseguire oltre le prime due guardie e stanze come invece fatto finora. Buonissimo segno." When a player engagement crosses from "demo hop" to "want to play", the build has crossed from tech-demo to actual-game. This is the threshold A.21 + post-port polish achieved. Not measurable in FPS. Worth recording in project memory because future "is it good enough?" questions become easier to answer with this anchor.
+- **Trap S17.A.21.4 — debug bar dirty-rect merge** caused a freeze that masqueraded as a residual perf issue but was really a Windows GDI dirty-region merge artifact. The bar's update was lightweight (FB_FillRect calls totaling ~10 KB byte writes), but its 320×30 InvalidateRect was being merged with the viewport's rect into a single bounding rect spanning most of the screen, forcing a ~64 KB flush per heartbeat. Generalization: when two `InvalidateRect` calls per timer tick produce dirty regions that don't share an edge but are far apart vertically, Windows may end up requesting a flush of the bounding box (everything between them included). Cost = bounding-box bytes, not sum-of-individual-bytes. For per-frame perf, prefer ONE invalidate per tick (or ensure the rects are small AND overlapping).
+- **Trap S17.A.21.5 — input-driven invalidate-on-rejected-action**. Not unique to fire — same pattern would apply to ANY input handler that calls a "tries to do X" function then unconditionally flags `moved=TRUE`. Generalization: any "intent" handler should propagate the success bit from the action, and the caller should only invalidate on success. Audit candidates: door toggle (already does — `if (ToggleDoorInFront()) moved = TRUE;`), minimap toggle (no-op anyway), music keys (no viewport effect).
+- **Recon-first 13-for-13** on completed milestones (A.21 wolfvis port single-iter zero-fix after the recon block; the W131 warning is cosmetic, doesn't count as a fix iteration).
+
+### Concrete results (S17 cont.)
+
+- New: `src/wolfvis_a21.c` (~3760 LOC), `src/build_wolfvis_a21.bat`, `src/link_wolfvis_a21.lnk` (with `__A000H` + `DisplayDib` IMPORTs), `src/mkiso_a21.py`.
+- New: `cd_root_a21/` (12 files, `SYSTEM.INI shell=a:\WOLFA21.EXE`).
+- New: `build/WOLFA21.EXE` (229,102 B), `build/wolfvis_a21.iso` (1.46 MB).
+- README.md row added (A.21 milestone), quick-start updated to A.21.
+- Memory: `project_milestone_A21_complete.md` (NEW, this session), `MEMORY.md` index updated.
+
+### Time invested
+
+S17 cont. ~45 min real (port impl 25 min + 2 polish iters 15 min + writeup 5 min). Plus S17 recon block ~1.5 h earlier in same session. Total S17 ≈ 2 h 15 min, delivering: full A.21 disasm + reference impl + wolfvis port at "voglia di proseguire" verdict.
+
+### Next-step candidates for S18
+
+A.21 closes the headline perf path. Project enters new phase (engagement + content):
+
+1. **A.20 — Enemy firing back + player health**. Long-deferred (S15 wrap → S16 → S17). Now genuinely playable framerate makes the firing-back loop fair gameplay rather than artificial difficulty.
+2. **L1 completion polish**: door-cluster bugs, stuck-spawn cases if any, possibly tile-collision audit. Once "voglia di proseguire" is sustained for 5+ rooms, the code paths the player exercises shift from "render a viewport" to "navigate a level".
+3. **Sound effects (SFX on fire / on enemy death)**: VSWAP has OPL3 chunks past the sprite range. Fire SFX is the single biggest game-feel multiplier left.
+4. **A.10.1 reopening — IMF stacks**: previously deferred (1ish frame stalls). Now that perf headroom is doubled, the stacks may be smaller / less noticeable. Worth a re-test.
+
+S17 closes here. User pacing memo confirmed (yet again) — recon-first investment, iterative empirical loops, no premature pivot, total time stays under 3h for a multi-subsystem milestone.
+
+---
