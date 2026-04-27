@@ -2,6 +2,16 @@
 tools/OW/
 tools/sfx_dump/
 
+# Custom MAME-VIS source tree (2.40 GB, copied from Hyperscan project at S19)
+# Used by the synth project for the patched vis.cpp + vis_midi_uart_device.
+# The patch itself will live in the future synth repo as a small .patch file
+# applied to a script-fetched fresh MAME tree.
+tools/mame-src/
+
+# synth project — owns its own git repo (planned). Excluded from W3D repo
+# so the two histories don't entangle.
+synth/
+
 # Copyright Tandy/Memorex — retail discs, BIOS, and validation file
 isos/
 vis.zip

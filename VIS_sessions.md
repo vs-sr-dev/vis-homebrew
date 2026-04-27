@@ -2585,3 +2585,15 @@ User-named at S18 close: "polish (drop ammo delle guardie, ecc)".
 6. **Light-by-distance** — last A.13.1 deferred item. With SFX + pickups + speed fixed, lighting becomes the next visual-polish multiplier.
 
 S18 closes. Recon-first 18-for-18, pacing memo confirmed once more (5 milestones in 3 h), HUD-diag-rescue established as new diagnostic tool.
+
+---
+
+## Session 19+ — synth project split to a separate repo
+
+Starting with S19 (2026-04-26), the VIS OPL3 synth work lives in its own
+repository: [**vs-sr-dev/vis-synth**](https://github.com/vs-sr-dev/vis-synth).
+The two projects share the VIS toolchain (Open Watcom V2, MAME, BIOS) but
+are otherwise independent — different goals, different audiences, different
+license-clean boundaries. This file (`VIS_sessions.md`) continues to track
+Wolf3D port work only; the synth log lives at `VIS_sessions_synth.md` in
+the vis-synth repo.
