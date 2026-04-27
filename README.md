@@ -4,7 +4,7 @@ Homebrew development for the **Tandy/Memorex Video Information System (VIS)** �
 
 The headline goal of this repo is a **Wolfenstein 3D port** running natively as a Win16 NE on Modular Windows VIS, rendered via GDI palette blits, with OPL3 audio over direct port I/O and hand-controller input.
 
-![Wolfenstein 3D running on MAME-emulated VIS at native 320×200×8 — combat scene, HUD showing level / score / ammo / BJ face panel.](screenshot.png)
+![Wolfenstein 3D running on MAME-emulated VIS at native 320×200×8 — ~14s gameplay clip captured via MAME -aviwrite, showing combat (firing sequence → guard kill at score 000100) and continued exploration.](wolfvis_demo.gif)
 
 Detailed per-session log: see [VIS_sessions.md](VIS_sessions.md).
 
